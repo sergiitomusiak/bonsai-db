@@ -1,8 +1,6 @@
 use anyhow::{anyhow, Result};
 use std::hash::Hasher;
 use std::mem::size_of;
-use std::cmp::Ordering;
-use std::convert::identity;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -17,9 +15,9 @@ const BRANCH_NODE: u16 = 1;
 const LEAF_NODE: u16 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct BranchInternalNode {
-    pub(crate) key: Vec<u8>,
-    pub(crate) node_id: NodeId,
+pub struct BranchInternalNode {
+    pub key: Vec<u8>,
+    pub node_address: Address,
 }
 
 impl BranchInternalNode {
@@ -39,13 +37,14 @@ impl BranchInternalNode {
         key.resize(key_len, 0);
         reader.read_exact(&mut key)?;
         Ok(Self {
-            node_id: NodeId::Address(address),
+            // node_id: NodeId::Address(address),
             key,
+            node_address: address,
         })
     }
 
     fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
-        write_u64(writer, self.node_id.address())?;
+        write_u64(writer, self.node_address)?;
         write_u16(writer, self.key.len() as u16)?;
         writer.write_all(&self.key)?;
         Ok(())
@@ -53,9 +52,9 @@ impl BranchInternalNode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LeafInternalNode {
-    pub(crate) key: Vec<u8>,
-    pub(crate) value: Vec<u8>,
+pub struct LeafInternalNode {
+    pub key: Vec<u8>,
+    pub value: Vec<u8>,
 }
 
 impl LeafInternalNode {
@@ -99,10 +98,10 @@ impl LeafInternalNode {
     }
 }
 
-pub(crate) struct NodeHeader {
-    pub(crate) flags: u16,
-    pub(crate) internal_nodes_len: u16,
-    pub(crate) overflow_len: u16,
+pub struct NodeHeader {
+    pub flags: u16,
+    pub internal_nodes_len: u16,
+    pub overflow_len: u16,
 }
 
 impl NodeHeader {
@@ -130,15 +129,15 @@ impl NodeHeader {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct MetaNode {
-    pub(crate) page_size: u32,
-    pub(crate) root_node: Address,
-    pub(crate) freelist_node: Address,
-    pub(crate) transaction_id: TransactionId,
+pub struct MetaNode {
+    pub page_size: u32,
+    pub root_node: Address,
+    pub freelist_node: Address,
+    pub transaction_id: TransactionId,
 }
 
 impl MetaNode {
-    pub(crate) fn size() -> usize {
+    pub fn size() -> usize {
         // page_size,
         size_of::<u32>() +
         // root_node
@@ -151,11 +150,11 @@ impl MetaNode {
         size_of::<u64>()
     }
 
-    pub(crate) fn page_size() -> u64 {
+    pub fn page_size() -> u64 {
         1 << 10 // 1KiB
     }
 
-    pub(crate) fn read<R: Read>(reader: &mut R) -> Result<Self> {
+    pub fn read<R: Read>(reader: &mut R) -> Result<Self> {
         let page_size = read_u32(reader)?;
         let root_node = read_u64(reader)? as Address;
         let freelist_node = read_u64(reader)? as Address;
@@ -176,7 +175,7 @@ impl MetaNode {
         Ok(meta_node)
     }
 
-    pub(crate) fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
+    pub fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
         write_u32(writer, self.page_size)?;
         write_u64(writer, self.root_node)?;
         write_u64(writer, self.freelist_node)?;
@@ -185,7 +184,7 @@ impl MetaNode {
         Ok(())
     }
 
-    pub(crate) fn checksum(&self) -> u32 {
+    pub fn checksum(&self) -> u32 {
         let mut h = crc32fast::Hasher::new();
         h.write_u32(self.page_size);
         h.write_u64(self.root_node);
@@ -196,13 +195,13 @@ impl MetaNode {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum InternalNodes {
+pub enum InternalNodes {
     Branch(Vec<BranchInternalNode>),
     Leaf(Vec<LeafInternalNode>),
 }
 
 impl InternalNodes {
-    pub(crate) fn size(&self) -> u32 {
+    pub fn size(&self) -> u32 {
         match self {
             Self::Branch(nodes) => {
                 nodes.iter().map(|node| node.size() as u32).sum()
@@ -213,7 +212,7 @@ impl InternalNodes {
         }
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         match self {
             Self::Branch(nodes) => {
                 nodes.len()
@@ -224,7 +223,22 @@ impl InternalNodes {
         }
     }
 
-    pub(crate) fn first_child(&self) -> Option<&BranchInternalNode> {
+    pub fn key_at(&self, index: usize) -> &[u8] {
+        match self {
+            Self::Branch(nodes) => {
+                nodes[index].key.as_ref()
+            },
+            Self::Leaf(nodes) => {
+                nodes[index].key.as_ref()
+            },
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn first_child(&self) -> Option<&BranchInternalNode> {
         match self {
             Self::Branch(nodes) => {
                 nodes.first()
@@ -235,7 +249,7 @@ impl InternalNodes {
         }
     }
 
-    pub(crate) fn read<R: Read>(reader: &mut R) -> Result<Self> {
+    pub fn read<R: Read>(reader: &mut R) -> Result<Self> {
         let header = NodeHeader::read(reader)?;
         if header.flags == BRANCH_NODE {
             let mut nodes = Vec::new();
@@ -254,7 +268,7 @@ impl InternalNodes {
         return Err(anyhow!("invalid node type {}", header.flags));
     }
 
-    pub(crate) fn write<W: Write>(&self, writer: &mut W, page_size: usize) -> Result<()> {
+    pub fn write<W: Write>(&self, writer: &mut W, page_size: usize) -> Result<()> {
         self.write_header(writer, page_size)?;
         match self {
             Self::Branch(nodes) => {
@@ -272,14 +286,14 @@ impl InternalNodes {
     }
 
     fn write_header<W: Write>(&self, writer: &mut W, page_size: usize) -> Result<()> {
-        let (nodes_len, nodes_size) = match self {
+        let (nodes_len, nodes_size, flags) = match self {
             Self::Branch(nodes) => {
                 let nodes_size: usize = nodes
                     .iter()
                     .map(|node| node.size())
                     .sum();
 
-                (nodes.len(), nodes_size)
+                (nodes.len(), nodes_size, BRANCH_NODE)
             },
             Self::Leaf(nodes) => {
                 let nodes_size: usize = nodes
@@ -287,7 +301,7 @@ impl InternalNodes {
                     .map(|node| node.size())
                     .sum();
 
-                (nodes.len(), nodes_size)
+                (nodes.len(), nodes_size, LEAF_NODE)
             },
         };
 
@@ -302,58 +316,62 @@ impl InternalNodes {
         assert!(overflow_len <= u16::MAX as usize);
 
         NodeHeader {
-            flags: BRANCH_NODE,
+            flags,
             internal_nodes_len: nodes_len as u16,
             overflow_len: overflow_len as u16,
         }.write(writer)
     }
 
-    pub(crate) fn has_min_keys(&self) -> bool {
+    pub fn has_min_keys(&self) -> bool {
         match self {
             Self::Branch(nodes) =>  nodes.len() > 2,
             Self::Leaf(nodes) => nodes.len() > 1,
         }
     }
 
-    pub (crate) fn index_of(&self, node_id: &NodeId) -> Option<usize> {
-        match self {
-            Self::Branch(nodes) => {
-                nodes.iter()
-                    .position(|node| &node.node_id == node_id)
-            }
-            Self::Leaf(..) => None
-        }
+    pub fn is_leaf(&self) -> bool {
+        matches!(self, Self::Leaf(..))
     }
 
-    pub (crate) fn remove(&mut self, node_id: &NodeId) -> bool {
-        match self {
-            Self::Branch(nodes) => {
-                let index = nodes.iter()
-                    .position(|node| &node.node_id == node_id);
-                if let Some(index) = index {
-                    nodes.remove(index);
-                    true
-                } else {
-                    false
-                }
-            }
-            Self::Leaf(..) => {
-                false
-            }
-        }
-    }
+    // pub (crate) fn index_of(&self, node_id: &NodeId) -> Option<usize> {
+    //     match self {
+    //         Self::Branch(nodes) => {
+    //             nodes.iter()
+    //                 .position(|node| &node.node_id == node_id)
+    //         }
+    //         Self::Leaf(..) => None
+    //     }
+    // }
+
+    // pub (crate) fn remove(&mut self, node_id: &NodeId) -> bool {
+    //     match self {
+    //         Self::Branch(nodes) => {
+    //             let index = nodes.iter()
+    //                 .position(|node| &node.node_id == node_id);
+    //             if let Some(index) = index {
+    //                 nodes.remove(index);
+    //                 true
+    //             } else {
+    //                 false
+    //             }
+    //         }
+    //         Self::Leaf(..) => {
+    //             false
+    //         }
+    //     }
+    // }
 }
 
-pub(crate) type Address = u64;
+pub type Address = u64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum NodeId {
+pub enum NodeId {
     Address(Address),
     Id(u64),
 }
 
 impl NodeId {
-    pub(crate) fn address(&self) -> Address {
+    pub fn address(&self) -> Address {
         let Self::Address(address) = self else {
             panic!("node id is not address");
         };
@@ -367,52 +385,60 @@ struct Files {
     files: Vec<File>,
 }
 
-pub trait NodeGetter<'a, N: AsRef<InternalNodes> + 'a>  {
-    fn get_node(&'a self, page_id: Address) -> Result<N>;
-}
+// pub trait NodeGetter<'a, N: AsRef<InternalNodes> + 'a>  {
+//     fn get_node(&'a self, page_id: Address) -> Result<N>;
+// }
 
-impl<'a> NodeGetter<'a, Arc<InternalNodes>> for FileNodeAccessor {
-    fn get_node(&'a self, page_id: Address) -> Result<Arc<InternalNodes>> {
-        let node = self.nodes_cache.get(&page_id);
-        if let Some(node) = node {
-            return Ok(node);
-        }
-        let node = Arc::new(self.read_node(page_id)?);
-        self.nodes_cache.insert(page_id, node.clone());
-        Ok(node)
-    }
-}
+// impl<'a> NodeGetter<'a, Arc<InternalNodes>> for FileNodeAccessor {
+//     fn get_node(&'a self, page_id: Address) -> Result<Arc<InternalNodes>> {
+//         let node = self.nodes_cache.get(&page_id);
+//         if let Some(node) = node {
+//             return Ok(node);
+//         }
+//         let node = Arc::new(self.read_node(page_id)?);
+//         self.nodes_cache.insert(page_id, node.clone());
+//         Ok(node)
+//     }
+// }
 
-pub(crate) struct FileNodeAccessor {
+pub struct NodeManager {
     file_path: PathBuf,
     max_files: usize,
     files: Mutex<Files>,
     files_condvar: Condvar,
     page_size: u32,
-    nodes_cache: moka::sync::Cache<Address, Arc<InternalNodes>>,
+    // nodes_cache: moka::sync::Cache<Address, Arc<InternalNodes>>,
 }
 
-impl FileNodeAccessor {
-    pub(crate) fn new(file_path: impl AsRef<Path>, max_files: usize, page_size: u32, cache_size: u32) -> Self {
+impl NodeManager {
+    pub fn new(file_path: impl AsRef<Path>, max_files: usize, page_size: u32, cache_size: u32) -> Self {
         Self {
             file_path: file_path.as_ref().to_path_buf(),
             max_files,
             files: Mutex::default(),
             files_condvar: Condvar::new(),
             page_size,
-            nodes_cache: moka::sync::Cache::builder()
-                .weigher(|_, node: &Arc<InternalNodes>| node.size())
-                .max_capacity(cache_size as u64)
-                .build(),
+            // nodes_cache: moka::sync::Cache::builder()
+            //     .weigher(|_, node: &Arc<InternalNodes>| node.size())
+            //     .max_capacity(cache_size as u64)
+            //     .build(),
         }
     }
 
-    fn read_node(&self, page_id: Address) -> Result<InternalNodes> {
+    pub fn write_node(&self, page_id: Address, node: &InternalNodes) -> Result<()> {
+        let mut file = self.get_file()?;
+        file.seek(SeekFrom::Start(page_id as u64 * self.page_size as u64))?;
+        let node = node.write(&mut file, self.page_size as usize)?;
+        self.release_file(file);
+        Ok(node)
+    }
+
+    pub fn read_node(&self, page_id: Address) -> Result<Arc<InternalNodes>> {
         let mut file = self.get_file()?;
         file.seek(SeekFrom::Start(page_id as u64 * self.page_size as u64))?;
         let node = InternalNodes::read(&mut file)?;
         self.release_file(file);
-        Ok(node)
+        Ok(Arc::new(node))
     }
 
     fn get_file(&self) -> Result<File> {
@@ -424,7 +450,7 @@ impl FileNodeAccessor {
 
             if files.files_len < self.max_files {
                 files.files_len += 1;
-                let file = OpenOptions::new().read(true).open(self.file_path.clone())?;
+                let file = OpenOptions::new().read(true).write(true).open(self.file_path.clone())?;
                 return Ok(file);
             }
 
@@ -441,63 +467,63 @@ impl FileNodeAccessor {
     }
 }
 
-pub(crate) struct NodeLocation {
-    pub(crate) address: Address,
-    pub(crate) index: usize,
-    pub(crate) exact_match: bool,
-    pub(crate) path: Vec<Address>,
-}
+// pub struct NodeLocation {
+//     pub address: Address,
+//     pub index: usize,
+//     pub exact_match: bool,
+//     pub path: Vec<Address>,
+// }
 
-pub(crate) fn find_node<'a, N, NG>(key: &[u8], root: Address, node_getter: &'a NG) -> Result<NodeLocation>
-where
-    N: AsRef<InternalNodes> + 'a,
-    NG: NodeGetter<'a, N>,
-{
-    let mut address = root;
-    let mut path = Vec::new();
-    loop {
-        // Get current node
-        let node = node_getter.get_node(address)?;
-        path.push(address);
-        let mut exact_match = false;
+// pub fn find_node<'a, N, NG>(key: &[u8], root: Address, node_getter: &'a NG) -> Result<NodeLocation>
+// where
+//     N: AsRef<InternalNodes> + 'a,
+//     NG: NodeGetter<'a, N>,
+// {
+//     let mut address = root;
+//     let mut path = Vec::new();
+//     loop {
+//         // Get current node
+//         let node = node_getter.get_node(address)?;
+//         path.push(address);
+//         let mut exact_match = false;
 
-        match node.as_ref() {
-            InternalNodes::Branch(nodes) => {
-                let mut index = nodes.binary_search_by(|internal_node| {
-                    let res = internal_node.key[..].cmp(key);
-                    if res == Ordering::Equal {
-                        exact_match = true;
-                    }
-                    res
-                })
-                .unwrap_or_else(identity);
+//         match node.as_ref() {
+//             InternalNodes::Branch(nodes) => {
+//                 let mut index = nodes.binary_search_by(|internal_node| {
+//                     let res = internal_node.key[..].cmp(key);
+//                     if res == Ordering::Equal {
+//                         exact_match = true;
+//                     }
+//                     res
+//                 })
+//                 .unwrap_or_else(identity);
 
-                if !exact_match && index > 0 {
-                    index -=1;
-                }
+//                 if !exact_match && index > 0 {
+//                     index -=1;
+//                 }
 
-                address = nodes[index].node_id.address();
-            },
-            InternalNodes::Leaf(nodes) => {
-                let index = nodes.binary_search_by(|internal_node| {
-                    let res = internal_node.key[..].cmp(key);
-                    if res == Ordering::Equal {
-                        exact_match = true;
-                    }
-                    res
-                })
-                .unwrap_or_else(identity);
+//                 address = nodes[index].node_id.address();
+//             },
+//             InternalNodes::Leaf(nodes) => {
+//                 let index = nodes.binary_search_by(|internal_node| {
+//                     let res = internal_node.key[..].cmp(key);
+//                     if res == Ordering::Equal {
+//                         exact_match = true;
+//                     }
+//                     res
+//                 })
+//                 .unwrap_or_else(identity);
 
-                return Ok(NodeLocation {
-                    address,
-                    index,
-                    exact_match,
-                    path,
-                });
-            }
-        };
-    }
-}
+//                 return Ok(NodeLocation {
+//                     address,
+//                     index,
+//                     exact_match,
+//                     path,
+//                 });
+//             }
+//         };
+//     }
+// }
 
 #[cfg(test)]
 mod tests {
@@ -537,12 +563,14 @@ mod tests {
 
         assert_eq!(nodes, vec![
             BranchInternalNode {
-                node_id: NodeId::Address(16),
+                // node_id: NodeId::Address(16),
                 key: (1..=10).into_iter().collect::<Vec<u8>>(),
+                node_address: 16,
             },
             BranchInternalNode {
-                node_id: NodeId::Address(33),
+                // node_id: NodeId::Address(33),
                 key: (17..=25).into_iter().collect::<Vec<u8>>(),
+                node_address: 33,
             }
         ]);
     }

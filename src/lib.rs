@@ -1,14 +1,15 @@
 use anyhow::{anyhow, Result};
 use format::{LimitedWriter, LimitedReader};
 use free_list::FreeList;
-use node::{FileNodeAccessor, MetaNode, InternalNodes};
-use tx::{ReadTransaction, WriteTransaction};
+use node::{NodeManager, MetaNode, InternalNodes};
+use tx::{WriteTransaction};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
+pub mod cursor;
 mod format;
-mod node;
+pub mod node;
 mod free_list;
 mod tx;
 
@@ -52,9 +53,9 @@ impl Database {
         })
     }
 
-    fn read(&self) -> ReadTransaction {
-        todo!()
-    }
+    // fn read(&self) -> ReadTransaction {
+    //     todo!()
+    // }
 
     fn write(&self) -> WriteTransaction {
         todo!()
@@ -117,7 +118,7 @@ impl Database {
                 transaction_id: 1,
             },
             free_list,
-            node_getter: FileNodeAccessor::new(
+            node_manager: NodeManager::new(
                 file_path,
                 options.max_read_files as usize,
                 options.page_size,
@@ -172,7 +173,7 @@ impl Database {
             initial_page_alignment,
             meta_node,
             free_list,
-            node_getter: FileNodeAccessor::new(
+            node_manager: NodeManager::new(
                 file_path,
                 options.max_read_files as usize,
                 options.page_size,
@@ -187,7 +188,7 @@ struct DatabaseState {
     initial_page_alignment: u64,
     meta_node: MetaNode,
     free_list: FreeList,
-    node_getter: FileNodeAccessor,
+    node_manager: NodeManager,
     page_size: u32,
 }
 

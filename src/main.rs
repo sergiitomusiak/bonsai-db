@@ -1,8 +1,168 @@
-use bonsai_db::{Database, Options};
+use anyhow::Result;
+use bonsai_db::{cursor::Cursor, node::{BranchInternalNode, InternalNodes, LeafInternalNode, NodeManager}, Database, Options};
+use std::sync::Arc;
+
+fn setup_test_for_cursor() -> Result<()> {
+    let path = "./my.db";
+    std::fs::File::create(&path)?;
+
+    let node_manager = NodeManager::new("./my.db", 10, 128, 1024);
+
+    // Root
+    let node = InternalNodes::Branch(vec![
+        BranchInternalNode {
+            key: b"key10".to_vec(),
+            node_address: 1,
+        },
+        BranchInternalNode {
+            key: b"key20".to_vec(),
+            node_address: 2,
+        },
+        BranchInternalNode {
+            key: b"key30".to_vec(),
+            node_address: 3,
+        },
+    ]);
+    node_manager.write_node(0, &node)?;
+
+    // Child1
+    let node = InternalNodes::Leaf(vec![
+        LeafInternalNode {
+            key: b"key10".to_vec(),
+            value: b"value10".to_vec(),
+        },
+        LeafInternalNode {
+            key: b"key12".to_vec(),
+            value: b"value12".to_vec(),
+        },
+    ]);
+    node_manager.write_node(1, &node)?;
+
+    // Child2
+    let node = InternalNodes::Leaf(vec![
+        LeafInternalNode {
+            key: b"key20".to_vec(),
+            value: b"value20".to_vec(),
+        },
+        LeafInternalNode {
+            key: b"key22".to_vec(),
+            value: b"value22".to_vec(),
+        },
+    ]);
+    node_manager.write_node(2, &node)?;
+
+    // Child3
+    let node = InternalNodes::Leaf(vec![
+        LeafInternalNode {
+            key: b"key30".to_vec(),
+            value: b"value30".to_vec(),
+        },
+        LeafInternalNode {
+            key: b"key32".to_vec(),
+            value: b"value32".to_vec(),
+        },
+    ]);
+    node_manager.write_node(3, &node)?;
+
+
+    Ok(())
+}
+
+fn run_basic_cursor_test() -> Result<()> {
+    println!("\nrun_basic_cursor_test\n");
+    let node_manager = NodeManager::new("./my.db", 10, 128, 1024);
+    let mut cursor = Cursor::new(0, Arc::new(node_manager))?;
+    while cursor.is_valid() {
+        println!(
+            "{:?} = {:?}",
+            String::from_utf8_lossy(cursor.key()),
+            String::from_utf8_lossy(cursor.value()),
+        );
+        cursor.next()?;
+    }
+    Ok(())
+}
+
+fn run_basic_cursor_reverse_test() -> Result<()> {
+    println!("\nrun_basic_cursor_reverse_test\n");
+    let node_manager = NodeManager::new("./my.db", 10, 128, 1024);
+    let mut cursor = Cursor::new(0, Arc::new(node_manager))?;
+    cursor.last()?;
+    while cursor.is_valid() {
+        println!(
+            "{:?} = {:?}",
+            String::from_utf8_lossy(cursor.key()),
+            String::from_utf8_lossy(cursor.value()),
+        );
+        if !cursor.prev()? {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn run_cursor_seek() -> Result<()> {
+    println!("\nrun_cursor_seek\n");
+    let node_manager = NodeManager::new("./my.db", 10, 128, 1024);
+    let seeks = [
+        "key0", "key10", "key11", "key12", "key13",
+        "key2", "key20", "key21", "key22", "key23",
+        "key3", "key30", "key31", "key32", "key33",
+        "key4",
+    ];
+
+    let node_manager = Arc::new(node_manager);
+
+    for seek in seeks {
+        let mut cursor = Cursor::new(0, node_manager.clone())?;
+        cursor.seek(seek.as_bytes())?;
+        if cursor.is_valid() {
+            println!(
+                "Seek = {:?}; Current key {:?} = {:?}",
+                seek,
+                String::from_utf8_lossy(cursor.key()),
+                String::from_utf8_lossy(cursor.value()),
+            );
+        } else {
+            println!("Seek = {:?}; Invalidated cursor", seek);
+        }
+    }
+
+    Ok(())
+}
 
 fn main() {
-    let _db = Database::open("./my.db", Options::default())
-        .expect("open database");
+    setup_test_for_cursor().expect("setup test for cursor");
+    run_basic_cursor_test().expect("basic cursor test");
+    run_basic_cursor_reverse_test().expect("basic cursor reverse test");
+    run_cursor_seek().expect("cursor seek");
+    // let node_manager = NodeManager::new("./my.db", 10, 128, 1024);
+
+    // let node = InternalNodes::Leaf(vec![
+    //     LeafInternalNode {
+    //         key: b"hello".to_vec(),
+    //         value: b"world".to_vec(),
+    //     },
+    //     LeafInternalNode {
+    //         key: b"hey".to_vec(),
+    //         value: b"man".to_vec(),
+    //     },
+    // ]);
+
+    // node_manager.write_node(0, &node).expect("write");
+    // node_manager.write_node(1, &node).expect("write");
+
+    // let node = node_manager.read_node(1).expect("read");
+    // let InternalNodes::Leaf(nodes) = node else {
+    //     panic!("unexpected node type");
+    // };
+
+    // for n in nodes {
+    //     println!("{:?} {:?}", String::from_utf8_lossy(&n.key), String::from_utf8_lossy(&n.value));
+    // }
+
+    // let _db = Database::open("./my.db", Options::default())
+    //     .expect("open database");
 
     //let f = std::fs::File::create("test.txt").unwrap();
     //f.try_clone()
