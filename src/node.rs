@@ -3,6 +3,7 @@ use std::hash::Hasher;
 use std::mem::size_of;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -17,7 +18,7 @@ const LEAF_NODE: u16 = 2;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BranchInternalNode {
     pub key: Vec<u8>,
-    pub node_address: Address,
+    pub node_id: NodeId,
 }
 
 impl BranchInternalNode {
@@ -39,12 +40,12 @@ impl BranchInternalNode {
         Ok(Self {
             // node_id: NodeId::Address(address),
             key,
-            node_address: address,
+            node_id: NodeId::Address(address),
         })
     }
 
     fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
-        write_u64(writer, self.node_address)?;
+        write_u64(writer, self.node_id.node_address())?;
         write_u16(writer, self.key.len() as u16)?;
         writer.write_all(&self.key)?;
         Ok(())
@@ -243,7 +244,7 @@ impl InternalNodes {
             Self::Branch(nodes) => {
                 nodes.first()
             },
-            Self::Leaf(nodes) => {
+            Self::Leaf(_) => {
                 None
             },
         }
@@ -371,11 +372,18 @@ pub enum NodeId {
 }
 
 impl NodeId {
-    pub fn address(&self) -> Address {
+    pub fn node_address(&self) -> Address {
         let Self::Address(address) = self else {
             panic!("node id is not address");
         };
         *address
+    }
+
+    pub fn id(&self) -> u64 {
+        let Self::Id(id) = self else {
+            panic!("node address is not id");
+        };
+        *id
     }
 }
 
@@ -401,6 +409,36 @@ struct Files {
 //     }
 // }
 
+#[derive(Clone, Debug)]
+pub enum Node<'a> {
+    Dirty(&'a InternalNodes),
+    ReadOnly(Arc<InternalNodes>),
+}
+
+impl<'a> Deref for Node<'a> {
+    type Target = InternalNodes;
+
+    fn deref(&self) -> &Self::Target {
+        match &self {
+            Self::Dirty(node) => node,
+            Self::ReadOnly(node) => node.as_ref()
+        }
+    }
+}
+
+impl<'a> AsRef<InternalNodes> for Node<'a> {
+    fn as_ref(&self) -> &InternalNodes {
+        match &self {
+            Self::Dirty(node) => node,
+            Self::ReadOnly(node) => node.as_ref()
+        }
+    }
+}
+
+pub trait NodeReader {
+    fn read_node<'a>(&'a self, node_id: NodeId) -> Result<Node<'a>>;
+}
+
 pub struct NodeManager {
     file_path: PathBuf,
     max_files: usize,
@@ -411,7 +449,7 @@ pub struct NodeManager {
 }
 
 impl NodeManager {
-    pub fn new(file_path: impl AsRef<Path>, max_files: usize, page_size: u32, cache_size: u32) -> Self {
+    pub fn new(file_path: impl AsRef<Path>, max_files: usize, page_size: u32) -> Self {
         Self {
             file_path: file_path.as_ref().to_path_buf(),
             max_files,
@@ -439,6 +477,10 @@ impl NodeManager {
         let node = InternalNodes::read(&mut file)?;
         self.release_file(file);
         Ok(Arc::new(node))
+    }
+
+    pub fn page_size(&self) -> u32 {
+        self.page_size
     }
 
     fn get_file(&self) -> Result<File> {
@@ -565,12 +607,12 @@ mod tests {
             BranchInternalNode {
                 // node_id: NodeId::Address(16),
                 key: (1..=10).into_iter().collect::<Vec<u8>>(),
-                node_address: 16,
+                node_id: NodeId::Address(16),
             },
             BranchInternalNode {
                 // node_id: NodeId::Address(33),
                 key: (17..=25).into_iter().collect::<Vec<u8>>(),
-                node_address: 33,
+                node_id: NodeId::Address(33),
             }
         ]);
     }

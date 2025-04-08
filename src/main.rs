@@ -1,26 +1,28 @@
 use anyhow::Result;
-use bonsai_db::{cursor::Cursor, node::{BranchInternalNode, InternalNodes, LeafInternalNode, NodeManager}, Database, Options};
+use bonsai_db::{
+    node::{BranchInternalNode, InternalNodes, LeafInternalNode, NodeId, NodeManager}, DatabaseState,
+};
 use std::sync::Arc;
 
 fn setup_test_for_cursor() -> Result<()> {
     let path = "./my.db";
     std::fs::File::create(&path)?;
 
-    let node_manager = NodeManager::new("./my.db", 10, 128, 1024);
+    let node_manager = NodeManager::new("./my.db", 10, 128);
 
     // Root
     let node = InternalNodes::Branch(vec![
         BranchInternalNode {
             key: b"key10".to_vec(),
-            node_address: 1,
+            node_id: NodeId::Address(1),
         },
         BranchInternalNode {
             key: b"key20".to_vec(),
-            node_address: 2,
+            node_id: NodeId::Address(2),
         },
         BranchInternalNode {
             key: b"key30".to_vec(),
-            node_address: 3,
+            node_id: NodeId::Address(3),
         },
     ]);
     node_manager.write_node(0, &node)?;
@@ -64,14 +66,24 @@ fn setup_test_for_cursor() -> Result<()> {
     ]);
     node_manager.write_node(3, &node)?;
 
-
     Ok(())
+}
+
+fn create_test_database() -> Result<Arc<DatabaseState>> {
+    let node_manager = NodeManager::new("./my.db", 10, 128);
+    Ok(Arc::new(DatabaseState {
+        node_manager,
+        root_node_id: NodeId::Address(0),
+    }))
 }
 
 fn run_basic_cursor_test() -> Result<()> {
     println!("\nrun_basic_cursor_test\n");
-    let node_manager = NodeManager::new("./my.db", 10, 128, 1024);
-    let mut cursor = Cursor::new(0, Arc::new(node_manager))?;
+    // let node_manager = NodeManager::new("./my.db", 10, 128, 1024);
+    let db = create_test_database()?;
+    let tx = db.begin_write();
+    let mut cursor = tx.cursor()?;
+    //let mut cursor = Cursor::new(0, Arc::new(node_manager))?;
     while cursor.is_valid() {
         println!(
             "{:?} = {:?}",
@@ -85,8 +97,11 @@ fn run_basic_cursor_test() -> Result<()> {
 
 fn run_basic_cursor_reverse_test() -> Result<()> {
     println!("\nrun_basic_cursor_reverse_test\n");
-    let node_manager = NodeManager::new("./my.db", 10, 128, 1024);
-    let mut cursor = Cursor::new(0, Arc::new(node_manager))?;
+    // let node_manager = NodeManager::new("./my.db", 10, 128, 1024);
+    // let mut cursor = Cursor::new(NodeId::Address(0), Arc::new(node_manager))?;
+    let db = create_test_database()?;
+    let tx = db.begin_write();
+    let mut cursor = tx.cursor()?;
     cursor.last()?;
     while cursor.is_valid() {
         println!(
@@ -103,7 +118,6 @@ fn run_basic_cursor_reverse_test() -> Result<()> {
 
 fn run_cursor_seek() -> Result<()> {
     println!("\nrun_cursor_seek\n");
-    let node_manager = NodeManager::new("./my.db", 10, 128, 1024);
     let seeks = [
         "key0", "key10", "key11", "key12", "key13",
         "key2", "key20", "key21", "key22", "key23",
@@ -111,10 +125,11 @@ fn run_cursor_seek() -> Result<()> {
         "key4",
     ];
 
-    let node_manager = Arc::new(node_manager);
-
     for seek in seeks {
-        let mut cursor = Cursor::new(0, node_manager.clone())?;
+        let db = create_test_database()?;
+        let tx = db.begin_write();
+        let mut cursor = tx.cursor()?;
+        //let mut cursor = Cursor::new(NodeId::Address(0), node_manager.clone())?;
         cursor.seek(seek.as_bytes())?;
         if cursor.is_valid() {
             println!(
@@ -131,11 +146,49 @@ fn run_cursor_seek() -> Result<()> {
     Ok(())
 }
 
+fn run_get_put_test() -> Result<()> {
+    println!("\nrun_get_put_test\n");
+    let db = create_test_database()?;
+    let mut tx = db.begin_write();
+
+    tx.put(b"key0", b"value0a")?;
+    tx.put(b"key10", b"value10a")?;
+    tx.put(b"key12", b"value12a")?;
+    tx.put(b"key20", b"value20a")?;
+    tx.put(b"key22", b"value22a")?;
+    tx.put(b"key30", b"value20a")?;
+    tx.put(b"key32", b"value22a")?;
+    tx.put(b"key40", b"value40a")?;
+
+    // tx.remove(b"key0")?;
+    // tx.remove(b"key10")?;
+    // tx.remove(b"key12")?;
+    // tx.remove(b"key20")?;
+    // tx.remove(b"key22")?;
+    // tx.remove(b"key30")?;
+    // tx.remove(b"key32")?;
+    // tx.remove(b"key40")?;
+
+    let mut cursor = tx.cursor()?;
+    //let mut cursor = Cursor::new(0, Arc::new(node_manager))?;
+    while cursor.is_valid() {
+        println!(
+            "{:?} = {:?}",
+            String::from_utf8_lossy(cursor.key()),
+            String::from_utf8_lossy(cursor.value()),
+        );
+        cursor.next()?;
+    }
+
+    Ok(())
+}
+
 fn main() {
     setup_test_for_cursor().expect("setup test for cursor");
     run_basic_cursor_test().expect("basic cursor test");
     run_basic_cursor_reverse_test().expect("basic cursor reverse test");
     run_cursor_seek().expect("cursor seek");
+    run_get_put_test().expect("get put");
     // let node_manager = NodeManager::new("./my.db", 10, 128, 1024);
 
     // let node = InternalNodes::Leaf(vec![

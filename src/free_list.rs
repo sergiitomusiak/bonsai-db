@@ -10,14 +10,14 @@ use std::io::{Read, Write};
 use std::mem::size_of;
 
 #[derive(Debug, Default)]
-pub(crate) struct FreeList {
-    free: BTreeSet<Address>,
-    pending: BTreeMap<TransactionId, BTreeSet<Address>>,
-    cache: HashSet<Address>,
+pub struct FreeList {
+    pub free: BTreeSet<Address>,
+    pub pending: BTreeMap<TransactionId, BTreeSet<Address>>,
+    pub cache: HashSet<Address>,
 }
 
 impl FreeList {
-    fn allocate(&mut self, required_pages: usize) -> Option<Address> {
+    pub fn allocate(&mut self, required_pages: usize) -> Option<Address> {
         let required_pages= required_pages as u64;
         let mut previous_page_id: Option<Address> = None;
         let mut initial_page_id = *self.free.first()?;
@@ -46,7 +46,7 @@ impl FreeList {
         None
     }
 
-    pub(crate) fn read<R: Read>(reader: &mut R) -> Result<Self> {
+    pub fn read<R: Read>(reader: &mut R) -> Result<Self> {
         let free_len = read_u64(reader)?;
         let free = read_vec_u64(reader, free_len as usize)?;
         let free = BTreeSet::from_iter(free);
@@ -57,14 +57,14 @@ impl FreeList {
         })
     }
 
-    pub(crate) fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
+    pub fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
         let data = self.copy_all();
         write_u64(writer, data.len() as u64)?;
         write_slice_u64(writer, &data)?;
         Ok(())
     }
 
-    fn free(&mut self, transaction_id: TransactionId, page_id: Address, page_overflow: u16) {
+    pub fn free(&mut self, transaction_id: TransactionId, page_id: Address, page_overflow: u16) {
         // assert!(page_id > 1, "freeing page id must be greater than 1");
         let pending = self.pending.entry(transaction_id).or_default();
         let overflow = page_id + page_overflow as u64;
@@ -75,7 +75,7 @@ impl FreeList {
         }
     }
 
-    fn release(&mut self, transaction_id: TransactionId) {
+    pub fn release(&mut self, transaction_id: TransactionId) {
         let txs = self.pending
             .range(..=transaction_id)
             .map(|(tx_id, _)| *tx_id).collect::<Vec<_>>();
@@ -90,15 +90,15 @@ impl FreeList {
         }
     }
 
-    fn size(&self) -> usize {
+    pub fn size(&self) -> usize {
         size_of::<u64>() * (self.pages_len() + 1)
     }
 
-    fn pages_len(&self) -> usize {
+    pub fn pages_len(&self) -> usize {
         self.free.len() + self.pending_pages_len()
     }
 
-    fn pending_pages_len(&self) -> usize {
+    pub fn pending_pages_len(&self) -> usize {
         self.pending.iter().map(|(_, pages)| pages.len()).sum()
     }
 
@@ -112,7 +112,7 @@ impl FreeList {
         self.free.union(&pending).map(|page_id| *page_id).collect()
     }
 
-    fn rollback(&mut self, transaction_id: TransactionId) {
+    pub fn rollback(&mut self, transaction_id: TransactionId) {
         let Some(pages) = self.pending.remove(&transaction_id)
             else { return; };
 
@@ -121,7 +121,7 @@ impl FreeList {
         }
     }
 
-    fn is_page_freed(&self, page_id: Address) -> bool {
+    pub fn is_page_freed(&self, page_id: Address) -> bool {
         self.cache.contains(&page_id)
     }
 }

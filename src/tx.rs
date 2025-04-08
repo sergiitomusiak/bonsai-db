@@ -1,31 +1,300 @@
 use anyhow::{anyhow, Result};
-use std::collections::HashSet;
-//use std::collections::BTreeMap;
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
-use crate::{Key, Value};
-use crate::node::{Address, InternalNodes, LeafInternalNode, MetaNode, NodeId};
+use crate::cursor::Cursor;
+use crate::node::{InternalNodes, LeafInternalNode, Node, NodeId, NodeReader};
 use crate::DatabaseState;
 
 pub type TransactionId = u64;
 
 pub struct WriteTransaction {
-    meta: MetaNode,
+    // meta: MetaNode,
     // pending: HashMap<Vec<u8>, Option<Vec<u8>>>,
     // nodes: Tree<PageId>,
     // nodes: HashMap<PageId, Node>,
     state: Arc<DatabaseState>,
+    next_node_id: u64,
+    nodes: HashMap<u64, InternalNodes>,
+    parent: HashMap<u64, u64>,
+    children: HashMap<u64, Vec<u64>>,
+    leaves: Vec<u64>,
+    root_node_id: NodeId,
 }
 
-pub struct ReadTransaction {
-    state: Arc<DatabaseState>,
-}
-
-impl ReadTransaction {
-    fn get(&self, key: &[u8]) -> Option<&[u8]> {
-        todo!()
+impl NodeReader for WriteTransaction {
+    fn read_node<'a>(&'a self, node_id: NodeId) -> Result<Node<'a>> {
+        let node = match node_id {
+            NodeId::Address(address) => {
+                Node::ReadOnly(self.state.node_manager.read_node(address)?)
+            },
+            NodeId::Id(node_id) => {
+                let node = self.nodes.get(&node_id).expect("tx nodes");
+                Node::Dirty(node)
+            },
+        };
+        Ok(node)
     }
 }
+
+impl WriteTransaction {
+    pub fn new(state: Arc<DatabaseState>, root_node_id: NodeId) -> Self {
+        Self {
+            state,
+            next_node_id: 1,
+            nodes: HashMap::new(),
+            parent: HashMap::new(),
+            children: HashMap::new(),
+            leaves: Vec::new(),
+            root_node_id,
+        }
+    }
+
+    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let mut cursor = Cursor::new(self.root_node_id, self)?;
+        cursor.seek(key)?;
+        if !cursor.is_valid() || cursor.key() != key {
+            return Ok(None);
+        }
+        Ok(Some(cursor.value().to_vec()))
+    }
+
+    pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.update(Update::Put(key.to_vec(), value.to_vec()))
+    }
+
+    pub fn remove(&mut self, key: &[u8]) -> Result<()> {
+        self.update(Update::Delete(key.to_vec()))
+    }
+
+    pub fn cursor<'a>(&'a self) -> Result<Cursor<'a>> {
+        Cursor::new(self.root_node_id, self)
+    }
+
+    fn update(&mut self, update: Update) -> Result<()> {
+        // Find node for update
+        let mut cursor = Cursor::new(self.root_node_id, self)?;
+        cursor.seek(update.key())?;
+
+        // Fast check if deleted key does not exist
+        if let Update::Delete(key) = &update {
+            if !cursor.is_valid() || cursor.key() != key {
+                return Ok(());
+            }
+        }
+
+        let mut stack = cursor.stack;
+
+        // Collect new dirty nodes
+        let mut new_dirty_nodes = Vec::new();
+        let mut existing_dirty_nodes = Vec::new();
+        while let Some(node_ref) = stack.pop() {
+            match &node_ref.node {
+                Node::ReadOnly(node) => {
+                    new_dirty_nodes.push((node_ref.index, node.as_ref().clone()));
+                }
+                Node::Dirty(_) => {
+                    existing_dirty_nodes.push((node_ref.index, node_ref.node_id.id()));
+                    break;
+                }
+            }
+        }
+
+        // Collect existing dirty nodes
+        while let Some(node_ref) = stack.pop() {
+            match &node_ref.node {
+                Node::Dirty(_) => {
+                    existing_dirty_nodes.push((node_ref.index, node_ref.node_id.id()));
+                }
+                Node::ReadOnly(_) => {
+                    panic!("unexpected read-only node");
+                }
+            }
+        }
+
+        new_dirty_nodes.reverse();
+        existing_dirty_nodes.reverse();
+
+        let has_new_dirty_nodes = !new_dirty_nodes.is_empty();
+
+        let (index, nodes, mut last_node_id) = if new_dirty_nodes.is_empty() {
+            let (index, node_id) = existing_dirty_nodes
+                .pop()
+                .ok_or_else(|| anyhow!("database is corrupted"))?;
+            let node = self.nodes.get_mut(&node_id)
+                .expect("node must exist");
+            let InternalNodes::Leaf(ref mut nodes) = node else {
+                panic!("expected leaf node");
+            };
+            (index, nodes, node_id)
+        } else {
+            let (index, node) = new_dirty_nodes
+                .pop()
+                .ok_or_else(|| anyhow!("database is corrupted"))?;
+            let node_id = self.insert_new(node);
+            let node = self.nodes.get_mut(&node_id)
+                .expect("node must exist");
+            let InternalNodes::Leaf(ref mut nodes) = node else {
+                panic!("expected leaf node");
+            };
+            (index, nodes, node_id)
+        };
+
+        self.leaves.push(last_node_id);
+
+        let items_shifted = match &update {
+            Update::Put(key, value) => {
+                if index < nodes.len() && key == &nodes[index].key {
+                    nodes[index].value = value.to_vec();
+                    false
+                } else {
+                    nodes.insert(index, LeafInternalNode { key: key.to_vec(), value: value.to_vec() });
+                    true
+                }
+            }
+            Update::Delete(_) => {
+                // No need to check index boundary because it was done in
+                // fast check earlier.
+                nodes.remove(index);
+                true
+            }
+        };
+
+        // Create new dirty branch nodes with potentially updated key item
+        let mut update_branch_key = items_shifted && index == 0;
+        while let Some((index, mut node)) = new_dirty_nodes.pop() {
+            let InternalNodes::Branch(ref mut nodes) = node else {
+                panic!("expected branch node");
+            };
+
+            nodes[index].node_id = NodeId::Id(last_node_id);
+            if update_branch_key {
+                nodes[index].key = update.key().to_vec();
+            }
+
+            update_branch_key &= index == 0;
+            let inserted_node_id = self.insert_new(node);
+            self.insert_parent(last_node_id, inserted_node_id);
+            last_node_id = inserted_node_id;
+        }
+
+        if has_new_dirty_nodes {
+            if let Some((index, node_id)) = existing_dirty_nodes.last() {
+                let node = self.nodes.get_mut(&node_id)
+                    .expect("node must exist");
+
+                let InternalNodes::Branch(ref mut nodes) = node else {
+                    panic!("expected branch node");
+                };
+                nodes[*index].node_id = NodeId::Id(last_node_id);
+                self.insert_parent(last_node_id, *node_id);
+            }
+        }
+
+        // Update existing dirty branch nodes with potentially updated key item
+        while let Some((index, node_id)) = existing_dirty_nodes.pop() {
+            if update_branch_key {
+                let node = self.nodes.get_mut(&node_id)
+                    .expect("node must exist");
+
+                let InternalNodes::Branch(ref mut nodes) = node else {
+                    panic!("expected branch node");
+                };
+
+                nodes[index].key = update.key().to_vec();
+            }
+            update_branch_key &= index == 0;
+            last_node_id = node_id;
+        }
+
+        self.root_node_id = NodeId::Id(last_node_id);
+
+        Ok(())
+    }
+
+    pub fn commit(mut self) -> Result<()> {
+        self.rebalance()?;
+        // TODO: Allocate and write dirty nodes
+        // TODO: Update meta pages
+        // TODO: Clean-up unused pages
+        // TODO: Update database state
+        Ok(())
+    }
+
+    fn rebalance(&mut self) -> Result<()> {
+        const MIN_KEY_PER_PAGE: usize = 2;
+        while let Some(node_id) = self.leaves.pop() {
+            let node = self.nodes.get(&node_id).expect("tx node");
+            let page_size = self.state.node_manager.page_size();
+            let merge_threshold = page_size / 4;
+            if node.size() < merge_threshold && !node.has_min_keys() {
+                // var threshold = n.bucket.tx.db.pageSize / 4
+                // if n.size() > threshold && len(n.inodes) > n.minKeys() {
+                //     return
+                // }
+                self.merge(node_id)?;
+            } else if node.len() >= (MIN_KEY_PER_PAGE*2) && node.size() > page_size {
+                // // Ignore the split if the page doesn't have at least enough nodes for
+                // // two pages or if the nodes can fit in a single page.
+                // if len(n.inodes) <= (minKeysPerPage*2) || n.sizeLessThan(pageSize) {
+                // 	return n, nil
+                // }
+                self.split(node_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn merge(&mut self, node_id: u64) -> Result<()> {
+        todo!()
+    }
+
+    fn split(&mut self, node_id: u64) -> Result<()> {
+        // // If we have at least the minimum number of keys and adding another
+        // // node would put us over the threshold then exit and return.
+        // if i >= minKeysPerPage && sz+elsize > threshold {
+        //     break
+        // }
+        todo!()
+    }
+
+    fn insert_new(&mut self, node: InternalNodes) -> u64 {
+        let id = self.next_node_id;
+        self.next_node_id += 1;
+        let added = self.nodes.insert(id, node).is_none();
+        assert!(added, "replacing existing dirty node");
+        id
+    }
+
+    fn insert_parent(&mut self, child_id: u64, parent_id: u64) {
+        let added = self.parent.insert(child_id, parent_id).is_none();
+        assert!(added, "replacing existing child parent mapping");
+        self.children.entry(parent_id).or_default().push(child_id);
+    }
+}
+
+enum Update {
+    Put(Vec<u8>, Vec<u8>),
+    Delete(Vec<u8>),
+}
+
+impl Update {
+    fn key(&self) -> &[u8] {
+        match &self {
+            Self::Put(key, _) => key,
+            Self::Delete(key) => key,
+        }
+    }
+}
+
+// pub struct ReadTransaction {
+//     state: Arc<DatabaseState>,
+// }
+
+// impl ReadTransaction {
+//     fn get(&self, key: &[u8]) -> Option<&[u8]> {
+//         todo!()
+//     }
+// }
 
 // impl<'a> NodeGetter<'a, NodeRef<'a>> for WriteTransaction {
 //     fn get_node(&'a self, page_id: PageId) -> Result<NodeRef<'a>> {

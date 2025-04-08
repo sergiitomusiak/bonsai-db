@@ -1,30 +1,30 @@
 use anyhow::Result;
-use std::sync::Arc;
 
-use crate::{node::{self, Address, InternalNodes, NodeManager}, DatabaseState};
+use crate::node::{InternalNodes, Node, NodeId, NodeReader};
 
-pub struct Cursor {
-    pub root_address: Address,
-    pub node_manager: Arc<NodeManager>,
-    pub stack: Vec<CursorNodeRef>,
+pub struct Cursor<'a> {
+    pub root_node_id: NodeId,
+    pub stack: Vec<CursorNodeRef<'a>>,
+    pub node_reader: &'a dyn NodeReader,
+    // pub node_manager: Arc<NodeManager>,
     // pub state: Arc<DatabaseState>,
     // pub current_node: Arc<InternalNodes>,
 }
 
 #[derive(Clone, Debug)]
-pub struct CursorNodeRef {
-    pub node: Arc<InternalNodes>,
-    pub node_address: Address,
+pub struct CursorNodeRef<'a> {
+    pub node: Node<'a>,
+    pub node_id: NodeId,
     pub index: usize,
 }
 
-impl Cursor {
-    pub fn new(root_address: Address, node_manager: Arc<NodeManager>) -> Result<Self> {
-        let root = node_manager.read_node(root_address)?;
+impl<'a> Cursor<'a> {
+    pub fn new(root_node_id: NodeId, node_reader: &'a dyn NodeReader) -> Result<Self> {
+        let root = node_reader.read_node(root_node_id)?;
         let mut cursor = Self {
-            root_address,
-            node_manager,
-            stack: vec![CursorNodeRef{node: root, index: 0, node_address: root_address}],
+            root_node_id,
+            node_reader,
+            stack: vec![CursorNodeRef{node: root, index: 0, node_id: root_node_id}],
         };
         cursor.move_to_first_leaf()?;
         Ok(cursor)
@@ -159,9 +159,9 @@ impl Cursor {
                     }).unwrap_or_else(|index| if index > 0 { index - 1 } else { 0 });
 
                     element.index = index;
-                    let node_address = nodes[element.index].node_address;
-                    let node = self.node_manager.read_node(node_address)?;
-                    self.stack.push(CursorNodeRef { node, index: 0, node_address });
+                    let node_id = nodes[element.index].node_id;
+                    let node = self.node_reader.read_node(node_id)?;
+                    self.stack.push(CursorNodeRef { node, index: 0, node_id });
                 },
                 InternalNodes::Leaf(nodes) => {
                     if element.node.is_empty() {
@@ -188,10 +188,10 @@ impl Cursor {
         Ok(())
     }
 
-    fn node_ref(&self) -> CursorNodeRef {
-        assert!(self.is_valid(), "cursor must be valid");
-        self.stack.last().expect("cursor stack top").clone()
-    }
+    // fn node_ref(&self) -> CursorNodeRef {
+    //     assert!(self.is_valid(), "cursor must be valid");
+    //     self.stack.last().expect("cursor stack top").clone()
+    // }
 
     fn move_to_first_leaf(&mut self) -> Result<()> {
         loop {
@@ -204,10 +204,10 @@ impl Cursor {
                 break;
             };
 
-            let node_address = nodes[element.index].node_address;
-            let node = self.node_manager.read_node(node_address)?;
+            let node_address = nodes[element.index].node_id;
+            let node = self.node_reader.read_node(node_address)?;
 
-            self.stack.push(CursorNodeRef { node, index: 0, node_address });
+            self.stack.push(CursorNodeRef { node, index: 0, node_id: node_address });
         }
         Ok(())
     }
@@ -223,10 +223,10 @@ impl Cursor {
                 break;
             };
 
-            let node_address = nodes[element.index].node_address;
-            let node = self.node_manager.read_node(node_address)?;
+            let node_address = nodes[element.index].node_id;
+            let node = self.node_reader.read_node(node_address)?;
             let index = if node.is_empty() { 0 } else { node.len() - 1 };
-            self.stack.push(CursorNodeRef { node, index, node_address });
+            self.stack.push(CursorNodeRef { node, index, node_id: node_address });
         }
         Ok(())
     }

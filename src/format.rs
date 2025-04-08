@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::io::{Read, Seek, Write};
+use std::io::{Read, Write};
 
 #[inline]
 pub(crate) fn read_u64<R: Read>(reader: &mut R) -> Result<u64> {
@@ -63,65 +63,65 @@ pub(crate) fn write_slice_u64<W: Write>(w: &mut W, values: &[u64]) -> Result<()>
     Ok(())
 }
 
-pub(crate) struct LimitedWriter<'a> {
-    left: usize,
-    file: &'a mut std::fs::File,
-}
+// pub(crate) struct LimitedWriter<'a> {
+//     left: usize,
+//     file: &'a mut std::fs::File,
+// }
 
-impl<'a> LimitedWriter<'a> {
-    pub(crate) fn new(file: &'a mut std::fs::File, offset: u64, size: usize) -> Result<Self> {
-        file.seek(std::io::SeekFrom::Start(offset))?;
-        Ok(Self {
-            file,
-            left: size,
-        })
-    }
-}
+// impl<'a> LimitedWriter<'a> {
+//     pub(crate) fn new(file: &'a mut std::fs::File, offset: u64, size: usize) -> Result<Self> {
+//         file.seek(std::io::SeekFrom::Start(offset))?;
+//         Ok(Self {
+//             file,
+//             left: size,
+//         })
+//     }
+// }
 
-impl<'a> Write for LimitedWriter<'a> {
-    fn write(&mut self, mut buf: &[u8]) -> std::io::Result<usize> {
-        if self.left == 0 {
-            return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "end of writer"));
-        }
-        if buf.len() > self.left {
-            buf = &buf[..self.left];
-        }
-        let written = self.file.write(buf)?;
-        self.left -= written;
-        Ok(written)
-    }
+// impl<'a> Write for LimitedWriter<'a> {
+//     fn write(&mut self, mut buf: &[u8]) -> std::io::Result<usize> {
+//         if self.left == 0 {
+//             return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "end of writer"));
+//         }
+//         if buf.len() > self.left {
+//             buf = &buf[..self.left];
+//         }
+//         let written = self.file.write(buf)?;
+//         self.left -= written;
+//         Ok(written)
+//     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.file.flush()
-    }
-}
+//     fn flush(&mut self) -> std::io::Result<()> {
+//         self.file.flush()
+//     }
+// }
 
-pub(crate) struct LimitedReader<'a> {
-    left: usize,
-    file: &'a mut std::fs::File,
-}
+// // pub(crate) struct LimitedReader<'a> {
+// //     left: usize,
+// //     file: &'a mut std::fs::File,
+// // }
 
-impl<'a> LimitedReader<'a> {
-    pub(crate) fn new(file: &'a mut std::fs::File, offset: u64, size: usize) -> Result<Self> {
-        file.seek(std::io::SeekFrom::Start(offset))?;
-        Ok(Self {
-            file,
-            left: size,
-        })
-    }
-}
+// // impl<'a> LimitedReader<'a> {
+// //     pub(crate) fn new(file: &'a mut std::fs::File, offset: u64, size: usize) -> Result<Self> {
+// //         file.seek(std::io::SeekFrom::Start(offset))?;
+// //         Ok(Self {
+// //             file,
+// //             left: size,
+// //         })
+// //     }
+// // }
 
-impl<'a> Read for LimitedReader<'a> {
-    // Required method
-    fn read(&mut self, mut buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.left == 0 {
-            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "unexpected end of data"));
-        }
-        if buf.len() > self.left {
-            buf = &mut buf[..self.left];
-        }
-        let read = self.file.read(buf)?;
-        self.left -= read;
-        Ok(read)
-    }
-}
+// // impl<'a> Read for LimitedReader<'a> {
+// //     // Required method
+// //     fn read(&mut self, mut buf: &mut [u8]) -> std::io::Result<usize> {
+// //         if self.left == 0 {
+// //             return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "unexpected end of data"));
+// //         }
+// //         if buf.len() > self.left {
+// //             buf = &mut buf[..self.left];
+// //         }
+// //         let read = self.file.read(buf)?;
+// //         self.left -= read;
+// //         Ok(read)
+// //     }
+// // }
