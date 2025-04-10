@@ -17,7 +17,7 @@ pub struct WriteTransaction {
     next_node_id: u64,
     nodes: HashMap<u64, InternalNodes>,
     parent: HashMap<u64, u64>,
-    children: HashMap<u64, Vec<u64>>,
+    // children: HashMap<u64, Vec<u64>>,
     leaves: Vec<u64>,
     root_node_id: NodeId,
 }
@@ -44,7 +44,7 @@ impl WriteTransaction {
             next_node_id: 1,
             nodes: HashMap::new(),
             parent: HashMap::new(),
-            children: HashMap::new(),
+            // children: HashMap::new(),
             leaves: Vec::new(),
             root_node_id,
         }
@@ -213,7 +213,10 @@ impl WriteTransaction {
     }
 
     pub fn commit(mut self) -> Result<()> {
-        self.rebalance()?;
+        if let NodeId::Id(node_id) = self.root_node_id {
+            self.merge_rec(node_id, 0)?;
+        }
+        // self.rebalance()?;
         // TODO: Allocate and write dirty nodes
         // TODO: Update meta pages
         // TODO: Clean-up unused pages
@@ -226,25 +229,29 @@ impl WriteTransaction {
             println!("No dirty nodes");
             return;
         };
-        let mut children = self.children.clone();
-        self.traverse_inner(node_id, &mut children);
+        self.traverse_inner(node_id);
     }
 
-    fn traverse_inner(&self, node_id: u64, children: &mut HashMap<u64, Vec<u64>>) {
+    fn traverse_inner(&self, node_id: u64) {
         let node = self.nodes.get(&node_id).expect("node");
         match node {
             InternalNodes::Branch(nodes) => {
                 println!("Branch = {node_id}");
+                let mut children_ids = Vec::new();
                 for n in nodes {
                     println!("\t{key:?} ->\t{child_node_id:?}",
                         key = String::from_utf8_lossy(&n.key),
                         child_node_id = n.node_id,
                     );
+
+                    if let NodeId::Id(id) = n.node_id {
+                        children_ids.push(id);
+                    }
                 }
 
-                let children_ids = children.remove(&node_id).expect("children");
+                // let children_ids = children.remove(&node_id).expect("children");
                 for c in children_ids {
-                    self.traverse_inner(c, children);
+                    self.traverse_inner(c);
                 }
             }
             InternalNodes::Leaf(nodes) => {
@@ -259,122 +266,208 @@ impl WriteTransaction {
         }
     }
 
-    fn rebalance_inner(&mut self, node_id: u64, children: &mut HashMap<u64, Vec<u64>>) -> Result<()> {
-        let node = self.nodes.get(&node_id).expect("node");
-        match node {
-            InternalNodes::Branch(nodes) => {
-                println!("Branch = {node_id}");
-                for n in nodes {
-                    println!("\t{key:?} ->\t{child_node_id:?}",
-                        key = String::from_utf8_lossy(&n.key),
-                        child_node_id = n.node_id,
-                    );
-                }
-
-                let children_ids = children.remove(&node_id).expect("children");
-                for c in children_ids {
-                    self.rebalance_inner(c, children)?;
-                }
-            },
-            InternalNodes::Leaf(nodes) => {
-                println!("Leaf = {node_id}");
-                for n in nodes {
-                    println!("\t{key:?} ->\t{value:?}",
-                        key = String::from_utf8_lossy(&n.key),
-                        value = String::from_utf8_lossy(&n.value),
-                    );
-                }
-            }
+    pub fn merge(&mut self) -> Result<()> {
+        if let NodeId::Id(node_id) = self.root_node_id {
+            self.merge_rec(node_id, 0)?;
         }
         Ok(())
     }
 
-    fn rebalance(&mut self) -> Result<()> {
-        const MIN_KEY_PER_PAGE: usize = 2;
-        while let Some(node_id) = self.leaves.pop() {
-            let node = self.nodes.get(&node_id).expect("tx node");
-            let page_size = self.state.node_manager.page_size();
-            let merge_threshold = page_size / 4;
-            if node.size() < merge_threshold && !node.has_min_keys() {
-                // var threshold = n.bucket.tx.db.pageSize / 4
-                // if n.size() > threshold && len(n.inodes) > n.minKeys() {
-                //     return
-                // }
-                self.merge(node_id)?;
-            } else if node.len() >= (MIN_KEY_PER_PAGE*2) && node.size() > page_size {
-                // // Ignore the split if the page doesn't have at least enough nodes for
-                // // two pages or if the nodes can fit in a single page.
-                // if len(n.inodes) <= (minKeysPerPage*2) || n.sizeLessThan(pageSize) {
-                // 	return n, nil
-                // }
-                self.split(node_id)?;
+    pub fn merge_rec(&mut self, node_id: u64, node_index: usize, ) -> Result<bool> {
+        let mut child_ref = {
+            let node = self.nodes.get(&node_id).expect("node");
+            node.next_dirty_child(0)
+        };
+
+        while let Some((child_node_id, mut child_node_index)) = child_ref {
+            // If child node was merged with either its left or right sibliing
+            // then right sibling is moved to its place and child_node_index should
+            // keep looking start next iteration from same position.
+            if !self.merge_rec(child_node_id, child_node_index)? {
+                child_node_index += 1;
             }
+            child_ref = {
+                let node = self.nodes.get(&node_id).expect("node");
+                node.next_dirty_child(child_node_index)
+            };
         }
-        Ok(())
+
+        let node = self.nodes.get(&node_id).expect("tx node");
+        let page_size = self.state.node_manager.page_size();
+        let merge_threshold = page_size / 4;
+        if node.size() < merge_threshold || !node.has_min_keys() {
+            self.merge_inner(node_id, node_index)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+        // match node {
+        //     InternalNodes::Branch(nodes) => {
+        //         // println!("Branch = {node_id}");
+        //         // let mut children_ids = Vec::new();
+        //         // for n in nodes {
+        //         //     println!("\t{key:?} ->\t{child_node_id:?}",
+        //         //         key = String::from_utf8_lossy(&n.key),
+        //         //         child_node_id = n.node_id,
+        //         //     );
+
+        //         //     if let NodeId::Id(id) = n.node_id {
+        //         //         children_ids.push(id);
+        //         //     }
+        //         // }
+
+        //         // // let children_ids = children.remove(&node_id).expect("children");
+        //         // for c in children_ids {
+        //         //     self.rebalance(c);
+        //         // }
+
+        //         // 1. Rebalance children
+        //         // 2. Split/merge itself
+        //     }
+        //     InternalNodes::Leaf(nodes) => {
+        //         // println!("Leaf = {node_id}");
+        //         // for n in nodes {
+        //         //     println!("\t{key:?} ->\t{value:?}",
+        //         //         key = String::from_utf8_lossy(&n.key),
+        //         //         value = String::from_utf8_lossy(&n.value),
+        //         //     );
+        //         // }
+
+        //         // Split/merge itself
+        //     }
+        // }
     }
 
-    fn merge(&mut self, node_id: u64) -> Result<()> {
-        // If root node is a branch and only has one node then collapse it.
+    fn merge_inner(&mut self, node_id: u64, node_index: usize) -> Result<()> {
         let is_root = self
             .parent
             .contains_key(&node_id)
             .not();
 
-        let root = is_root
-            .then(|| node_id)
-            .and_then(|node_id| self.nodes.get_mut(&node_id));
-
         // If root node is a branch and only has one node then collapse it.
-        let new_root_id = if let Some(InternalNodes::Branch(nodes)) = root {
-            if nodes.len() == 1 {
-                nodes[0].node_id.id().into()
+        if is_root {
+            let root = self.nodes.get_mut(&node_id).expect("root node");
+
+            // If root node is a branch and only has one child node then collapse it.
+            let new_root_id = if let InternalNodes::Branch(nodes) = root {
+                if nodes.len() == 1 {
+                    nodes[0].node_id.id().into()
+                } else {
+                    None
+                }
             } else {
                 None
-            }
-        } else {
-            None
-        };
+            };
 
-        if is_root {
             if let Some(new_root_id) = new_root_id {
                 self.root_node_id = NodeId::Id(new_root_id);
                 let parent = self.parent.remove(&new_root_id);
                 assert_eq!(parent, Some(node_id));
-                let children = self.children.remove(&node_id);
-                assert_eq!(children, Some(vec![new_root_id]));
+                let removed = self.nodes.remove(&node_id).is_some();
+                assert!(removed, "root node must be removed");
+                // let children = self.children.remove(&node_id);
+                // assert_eq!(children, Some(vec![new_root_id]));
             }
             return Ok(());
         }
 
+
         // If node has no children then remove it
-        let node = self.nodes.get(&node_id).expect("node");
-        let parent_id = self.parent.remove(&node_id).expect("node parent");
-        if node.len() == 0 {
-            let children = self.children.get_mut(&parent_id).expect("children");
-            let index = children.iter()
-                .position(|child_id| *child_id == node_id)
-                .expect("node child");
-            children.swap_remove(index);
-            return Ok(())
+        let parent_id = *self.parent.get(&node_id).expect("node parent");
+        {
+            let node = self.nodes.get(&node_id).expect("node");
+            if node.len() == 0 {
+                let removed = self.parent.remove(&node_id).is_some();
+                assert!(removed, "parent node must be removed");
+                let removed = self.nodes.remove(&node_id).is_some();
+                assert!(removed, "empty node must be removed");
+
+                // let children = self.children.get_mut(&parent_id).expect("children");
+                // let index = children.iter()
+                //     .position(|child_id| *child_id == node_id)
+                //     .expect("node child");
+                // children.swap_remove(index);
+                return Ok(())
+            }
         }
 
         // Parent must have at least two nodes
-        let parent = self.nodes.get(&parent_id).expect("parent node");
-        assert!(parent.len() > 1, "parent must have at least 2 children");
+        {
+            let parent = self.nodes.get(&parent_id).expect("parent node");
+            assert!(parent.len() > 1, "parent must have at least 2 children");
+        }
 
-        // Merge with a sibling
-        todo!();
+        let sibling_node_id = if node_index == 0 {
+            self.get_child_at_index(parent_id, node_index + 1)?
+        } else {
+            self.get_child_at_index(parent_id, node_index - 1)?
+        };
 
-        // Ok(())
+        if node_index == 0 {
+            // merge with next sibling
+            let next_sibling = self
+                .nodes
+                .remove(&sibling_node_id)
+                .expect("next sibling");
+
+            self.nodes
+                .get_mut(&node_id).expect("node")
+                .merge(next_sibling);
+
+            self.nodes
+                .get_mut(&parent_id).expect("node")
+                .remove_child_at(node_index + 1);
+
+            let removed = self.parent.remove(&sibling_node_id).is_some();
+            assert!(removed, "parent node must be removed");
+        } else {
+            // merge with previous sibling
+            let node = self
+                .nodes
+                .remove(&node_id)
+                .expect("current node");
+
+            self.nodes
+                .get_mut(&sibling_node_id).expect("node")
+                .merge(node);
+
+            self.nodes
+                .get_mut(&parent_id).expect("node")
+                .remove_child_at(node_index);
+
+            let removed = self.parent.remove(&node_id).is_some();
+            assert!(removed, "parent node must be removed");
+        }
+
+        Ok(())
     }
 
-    fn split(&mut self, node_id: u64) -> Result<()> {
+    fn split(&mut self, _node_id: u64) -> Result<()> {
         // // If we have at least the minimum number of keys and adding another
         // // node would put us over the threshold then exit and return.
         // if i >= minKeysPerPage && sz+elsize > threshold {
         //     break
         // }
         todo!()
+    }
+
+    fn get_child_at_index(&mut self, node_id: u64, child_index: usize) -> Result<u64> {
+        let node = self.nodes.get(&node_id).expect("node must exist");
+        let InternalNodes::Branch(nodes) = node else {
+            panic!("must be branch node");
+        };
+
+        match nodes[child_index].node_id {
+            NodeId::Id(child_node_id) => Ok(child_node_id),
+            NodeId::Address(page_address) => {
+                let node = self.state.node_manager.read_node(page_address)?
+                    .as_ref().clone();
+
+                let child_node_id = self.insert_new(node);
+                self.insert_parent(child_node_id, node_id);
+                Ok(child_node_id)
+            },
+        }
     }
 
     fn insert_new(&mut self, node: InternalNodes) -> u64 {
@@ -388,7 +481,7 @@ impl WriteTransaction {
     fn insert_parent(&mut self, child_id: u64, parent_id: u64) {
         let added = self.parent.insert(child_id, parent_id).is_none();
         assert!(added, "replacing existing child parent mapping");
-        self.children.entry(parent_id).or_default().push(child_id);
+        // self.children.entry(parent_id).or_default().push(child_id);
     }
 }
 

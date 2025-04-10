@@ -151,35 +151,36 @@ fn run_get_put_test() -> Result<()> {
     let db = create_test_database()?;
     let mut tx = db.begin_write();
 
-    tx.put(b"key0", b"value0a")?;
-    tx.put(b"key10a", b"value10a")?;
-    tx.put(b"key12a", b"value12a")?;
-    tx.put(b"key20a", b"value20a")?;
-    tx.put(b"key22a", b"value22a")?;
-    tx.put(b"key30a", b"value20a")?;
-    tx.put(b"key32a", b"value22a")?;
-    tx.put(b"key40a", b"value40a")?;
+    // tx.put(b"key0", b"value0a")?;
+    // tx.put(b"key10a", b"value10a")?;
+    // tx.put(b"key12a", b"value12a")?;
+    // tx.put(b"key20a", b"value20a")?;
+    // tx.put(b"key22a", b"value22a")?;
+    // tx.put(b"key30a", b"value20a")?;
+    // tx.put(b"key32a", b"value22a")?;
+    // tx.put(b"key40a", b"value40a")?;
 
     // tx.remove(b"key0")?;
-    // tx.remove(b"key10")?;
+    tx.remove(b"key10")?;
     // tx.remove(b"key12")?;
-    // tx.remove(b"key20")?;
+    tx.remove(b"key20")?;
     // tx.remove(b"key22")?;
-    // tx.remove(b"key30")?;
+    tx.remove(b"key30")?;
     // tx.remove(b"key32")?;
     // tx.remove(b"key40")?;
 
-    let mut cursor = tx.cursor()?;
-    //let mut cursor = Cursor::new(0, Arc::new(node_manager))?;
-    while cursor.is_valid() {
-        println!(
-            "{:?} = {:?}",
-            String::from_utf8_lossy(cursor.key()),
-            String::from_utf8_lossy(cursor.value()),
-        );
-        cursor.next()?;
-    }
+    // let mut cursor = tx.cursor()?;
+    // //let mut cursor = Cursor::new(0, Arc::new(node_manager))?;
+    // while cursor.is_valid() {
+    //     println!(
+    //         "{:?} = {:?}",
+    //         String::from_utf8_lossy(cursor.key()),
+    //         String::from_utf8_lossy(cursor.value()),
+    //     );
+    //     cursor.next()?;
+    // }
 
+    tx.merge()?;
     tx.traverse();
 
     Ok(())

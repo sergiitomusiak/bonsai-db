@@ -250,6 +250,42 @@ impl InternalNodes {
         }
     }
 
+    pub fn next_dirty_child(&self, start_index: usize) -> Option<(u64, usize)> {
+        if let Self::Branch(nodes) = self {
+            for (index, node) in nodes[start_index..].iter().enumerate() {
+                if let NodeId::Id(id) = node.node_id {
+                    return Some((id, start_index + index))
+                }
+            }
+        }
+        None
+    }
+
+    pub fn remove_child_at(&mut self, index: usize) {
+        let Self::Branch(nodes) = self else {
+            panic!("cannot remove child from leaf node");
+        };
+        nodes.remove(index);
+    }
+
+    pub fn merge(&mut self, other: InternalNodes) {
+        match (self, other) {
+            (
+                Self::Branch(self_nodes),
+                Self::Branch(mut other_nodes),
+            ) => {
+                self_nodes.append(&mut other_nodes);
+            },
+            (
+                Self::Leaf(self_nodes),
+                Self::Leaf(mut other_nodes),
+            ) => {
+                self_nodes.append(&mut other_nodes);
+            }
+            _ => panic!("incompatible nodes"),
+        }
+    }
+
     pub fn read<R: Read>(reader: &mut R) -> Result<Self> {
         let header = NodeHeader::read(reader)?;
         if header.flags == BRANCH_NODE {
