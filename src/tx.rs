@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
+use std::ops::Not;
 use std::sync::Arc;
 use crate::cursor::Cursor;
 use crate::node::{InternalNodes, LeafInternalNode, Node, NodeId, NodeReader};
@@ -220,6 +221,74 @@ impl WriteTransaction {
         Ok(())
     }
 
+    pub fn traverse(&mut self) {
+        let NodeId::Id(node_id) = self.root_node_id else {
+            println!("No dirty nodes");
+            return;
+        };
+        let mut children = self.children.clone();
+        self.traverse_inner(node_id, &mut children);
+    }
+
+    fn traverse_inner(&self, node_id: u64, children: &mut HashMap<u64, Vec<u64>>) {
+        let node = self.nodes.get(&node_id).expect("node");
+        match node {
+            InternalNodes::Branch(nodes) => {
+                println!("Branch = {node_id}");
+                for n in nodes {
+                    println!("\t{key:?} ->\t{child_node_id:?}",
+                        key = String::from_utf8_lossy(&n.key),
+                        child_node_id = n.node_id,
+                    );
+                }
+
+                let children_ids = children.remove(&node_id).expect("children");
+                for c in children_ids {
+                    self.traverse_inner(c, children);
+                }
+            }
+            InternalNodes::Leaf(nodes) => {
+                println!("Leaf = {node_id}");
+                for n in nodes {
+                    println!("\t{key:?} ->\t{value:?}",
+                        key = String::from_utf8_lossy(&n.key),
+                        value = String::from_utf8_lossy(&n.value),
+                    );
+                }
+            }
+        }
+    }
+
+    fn rebalance_inner(&mut self, node_id: u64, children: &mut HashMap<u64, Vec<u64>>) -> Result<()> {
+        let node = self.nodes.get(&node_id).expect("node");
+        match node {
+            InternalNodes::Branch(nodes) => {
+                println!("Branch = {node_id}");
+                for n in nodes {
+                    println!("\t{key:?} ->\t{child_node_id:?}",
+                        key = String::from_utf8_lossy(&n.key),
+                        child_node_id = n.node_id,
+                    );
+                }
+
+                let children_ids = children.remove(&node_id).expect("children");
+                for c in children_ids {
+                    self.rebalance_inner(c, children)?;
+                }
+            },
+            InternalNodes::Leaf(nodes) => {
+                println!("Leaf = {node_id}");
+                for n in nodes {
+                    println!("\t{key:?} ->\t{value:?}",
+                        key = String::from_utf8_lossy(&n.key),
+                        value = String::from_utf8_lossy(&n.value),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn rebalance(&mut self) -> Result<()> {
         const MIN_KEY_PER_PAGE: usize = 2;
         while let Some(node_id) = self.leaves.pop() {
@@ -245,7 +314,58 @@ impl WriteTransaction {
     }
 
     fn merge(&mut self, node_id: u64) -> Result<()> {
-        todo!()
+        // If root node is a branch and only has one node then collapse it.
+        let is_root = self
+            .parent
+            .contains_key(&node_id)
+            .not();
+
+        let root = is_root
+            .then(|| node_id)
+            .and_then(|node_id| self.nodes.get_mut(&node_id));
+
+        // If root node is a branch and only has one node then collapse it.
+        let new_root_id = if let Some(InternalNodes::Branch(nodes)) = root {
+            if nodes.len() == 1 {
+                nodes[0].node_id.id().into()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if is_root {
+            if let Some(new_root_id) = new_root_id {
+                self.root_node_id = NodeId::Id(new_root_id);
+                let parent = self.parent.remove(&new_root_id);
+                assert_eq!(parent, Some(node_id));
+                let children = self.children.remove(&node_id);
+                assert_eq!(children, Some(vec![new_root_id]));
+            }
+            return Ok(());
+        }
+
+        // If node has no children then remove it
+        let node = self.nodes.get(&node_id).expect("node");
+        let parent_id = self.parent.remove(&node_id).expect("node parent");
+        if node.len() == 0 {
+            let children = self.children.get_mut(&parent_id).expect("children");
+            let index = children.iter()
+                .position(|child_id| *child_id == node_id)
+                .expect("node child");
+            children.swap_remove(index);
+            return Ok(())
+        }
+
+        // Parent must have at least two nodes
+        let parent = self.nodes.get(&parent_id).expect("parent node");
+        assert!(parent.len() > 1, "parent must have at least 2 children");
+
+        // Merge with a sibling
+        todo!();
+
+        // Ok(())
     }
 
     fn split(&mut self, node_id: u64) -> Result<()> {

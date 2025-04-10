@@ -188,11 +188,6 @@ impl<'a> Cursor<'a> {
         Ok(())
     }
 
-    // fn node_ref(&self) -> CursorNodeRef {
-    //     assert!(self.is_valid(), "cursor must be valid");
-    //     self.stack.last().expect("cursor stack top").clone()
-    // }
-
     fn move_to_first_leaf(&mut self) -> Result<()> {
         loop {
             let element = self

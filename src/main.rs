@@ -152,13 +152,13 @@ fn run_get_put_test() -> Result<()> {
     let mut tx = db.begin_write();
 
     tx.put(b"key0", b"value0a")?;
-    tx.put(b"key10", b"value10a")?;
-    tx.put(b"key12", b"value12a")?;
-    tx.put(b"key20", b"value20a")?;
-    tx.put(b"key22", b"value22a")?;
-    tx.put(b"key30", b"value20a")?;
-    tx.put(b"key32", b"value22a")?;
-    tx.put(b"key40", b"value40a")?;
+    tx.put(b"key10a", b"value10a")?;
+    tx.put(b"key12a", b"value12a")?;
+    tx.put(b"key20a", b"value20a")?;
+    tx.put(b"key22a", b"value22a")?;
+    tx.put(b"key30a", b"value20a")?;
+    tx.put(b"key32a", b"value22a")?;
+    tx.put(b"key40a", b"value40a")?;
 
     // tx.remove(b"key0")?;
     // tx.remove(b"key10")?;
@@ -179,6 +179,8 @@ fn run_get_put_test() -> Result<()> {
         );
         cursor.next()?;
     }
+
+    tx.traverse();
 
     Ok(())
 }
