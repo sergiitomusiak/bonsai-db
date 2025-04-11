@@ -3,22 +3,17 @@ use std::collections::HashMap;
 use std::ops::Not;
 use std::sync::Arc;
 use crate::cursor::Cursor;
-use crate::node::{InternalNodes, LeafInternalNode, Node, NodeId, NodeReader};
+use crate::node::{InternalNodes, BranchInternalNode, LeafInternalNode, Node, NodeId, NodeReader, MIN_KEYS_PER_PAGE};
 use crate::DatabaseState;
 
 pub type TransactionId = u64;
 
 pub struct WriteTransaction {
     // meta: MetaNode,
-    // pending: HashMap<Vec<u8>, Option<Vec<u8>>>,
-    // nodes: Tree<PageId>,
-    // nodes: HashMap<PageId, Node>,
     state: Arc<DatabaseState>,
     next_node_id: u64,
     nodes: HashMap<u64, InternalNodes>,
     parent: HashMap<u64, u64>,
-    // children: HashMap<u64, Vec<u64>>,
-    leaves: Vec<u64>,
     root_node_id: NodeId,
 }
 
@@ -44,8 +39,6 @@ impl WriteTransaction {
             next_node_id: 1,
             nodes: HashMap::new(),
             parent: HashMap::new(),
-            // children: HashMap::new(),
-            leaves: Vec::new(),
             root_node_id,
         }
     }
@@ -69,6 +62,104 @@ impl WriteTransaction {
 
     pub fn cursor<'a>(&'a self) -> Result<Cursor<'a>> {
         Cursor::new(self.root_node_id, self)
+    }
+
+    pub fn commit(mut self) -> Result<()> {
+        if let NodeId::Id(node_id) = self.root_node_id {
+            self.traverse_merge(node_id, 0)?;
+            self.traverse_split(node_id, 0)?;
+        }
+        // TODO: Allocate and write dirty nodes
+        // TODO: Update meta pages
+        // TODO: Clean-up unused pages
+        // TODO: Update database state
+        Ok(())
+    }
+
+    pub fn traverse(&mut self) {
+        let NodeId::Id(node_id) = self.root_node_id else {
+            println!("No dirty nodes");
+            return;
+        };
+        self.traverse_inner(node_id);
+    }
+
+    fn traverse_inner(&self, node_id: u64) {
+        let node = self.nodes.get(&node_id).expect("node");
+        match node {
+            InternalNodes::Branch(nodes) => {
+                println!("Branch = {node_id}");
+                let mut children_ids = Vec::new();
+                for n in nodes {
+                    println!("\t{key:?} ->\t{child_node_id:?}",
+                        key = String::from_utf8_lossy(&n.key),
+                        child_node_id = n.node_id,
+                    );
+
+                    if let NodeId::Id(id) = n.node_id {
+                        children_ids.push(id);
+                    }
+                }
+
+                // let children_ids = children.remove(&node_id).expect("children");
+                for c in children_ids {
+                    self.traverse_inner(c);
+                }
+            }
+            InternalNodes::Leaf(nodes) => {
+                println!("Leaf = {node_id}");
+                for n in nodes {
+                    println!("\t{key:?} ->\t{value:?}",
+                        key = String::from_utf8_lossy(&n.key),
+                        value = String::from_utf8_lossy(&n.value),
+                    );
+                }
+            }
+        }
+    }
+
+    pub fn merge(&mut self) -> Result<()> {
+        if let NodeId::Id(node_id) = self.root_node_id {
+            self.traverse_merge(node_id, 0)?;
+        }
+        Ok(())
+    }
+
+    pub fn split(&mut self) -> Result<()> {
+        if let NodeId::Id(node_id) = self.root_node_id {
+            self.traverse_split(node_id, 0)?;
+        }
+        Ok(())
+    }
+
+    pub fn traverse_merge(&mut self, node_id: u64, node_index: usize, ) -> Result<bool> {
+        let mut child_ref = {
+            let node = self.nodes.get(&node_id).expect("node");
+            node.next_dirty_child(0)
+        };
+
+        while let Some((child_node_id, mut child_node_index)) = child_ref {
+            // If child node was merged with either its left or right sibliing
+            // then right sibling is moved to its place and child_node_index should
+            // keep looking start next iteration from same position.
+            if !self.traverse_merge(child_node_id, child_node_index)? {
+                child_node_index += 1;
+            }
+            child_ref = {
+                let node = self.nodes.get(&node_id).expect("node");
+                node.next_dirty_child(child_node_index)
+            };
+        }
+
+        let node = self.nodes.get(&node_id).expect("tx node");
+        let page_size = self.state.node_manager.page_size();
+        let merge_threshold = page_size / 4;
+        if node.size() < merge_threshold || !node.has_min_keys() {
+            self.merge_node(node_id, node_index)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     fn update(&mut self, update: Update) -> Result<()> {
@@ -140,8 +231,6 @@ impl WriteTransaction {
             (index, nodes, node_id)
         };
 
-        self.leaves.push(last_node_id);
-
         let items_shifted = match &update {
             Update::Put(key, value) => {
                 if index < nodes.len() && key == &nodes[index].key {
@@ -212,133 +301,7 @@ impl WriteTransaction {
         Ok(())
     }
 
-    pub fn commit(mut self) -> Result<()> {
-        if let NodeId::Id(node_id) = self.root_node_id {
-            self.merge_rec(node_id, 0)?;
-        }
-        // self.rebalance()?;
-        // TODO: Allocate and write dirty nodes
-        // TODO: Update meta pages
-        // TODO: Clean-up unused pages
-        // TODO: Update database state
-        Ok(())
-    }
-
-    pub fn traverse(&mut self) {
-        let NodeId::Id(node_id) = self.root_node_id else {
-            println!("No dirty nodes");
-            return;
-        };
-        self.traverse_inner(node_id);
-    }
-
-    fn traverse_inner(&self, node_id: u64) {
-        let node = self.nodes.get(&node_id).expect("node");
-        match node {
-            InternalNodes::Branch(nodes) => {
-                println!("Branch = {node_id}");
-                let mut children_ids = Vec::new();
-                for n in nodes {
-                    println!("\t{key:?} ->\t{child_node_id:?}",
-                        key = String::from_utf8_lossy(&n.key),
-                        child_node_id = n.node_id,
-                    );
-
-                    if let NodeId::Id(id) = n.node_id {
-                        children_ids.push(id);
-                    }
-                }
-
-                // let children_ids = children.remove(&node_id).expect("children");
-                for c in children_ids {
-                    self.traverse_inner(c);
-                }
-            }
-            InternalNodes::Leaf(nodes) => {
-                println!("Leaf = {node_id}");
-                for n in nodes {
-                    println!("\t{key:?} ->\t{value:?}",
-                        key = String::from_utf8_lossy(&n.key),
-                        value = String::from_utf8_lossy(&n.value),
-                    );
-                }
-            }
-        }
-    }
-
-    pub fn merge(&mut self) -> Result<()> {
-        if let NodeId::Id(node_id) = self.root_node_id {
-            self.merge_rec(node_id, 0)?;
-        }
-        Ok(())
-    }
-
-    pub fn merge_rec(&mut self, node_id: u64, node_index: usize, ) -> Result<bool> {
-        let mut child_ref = {
-            let node = self.nodes.get(&node_id).expect("node");
-            node.next_dirty_child(0)
-        };
-
-        while let Some((child_node_id, mut child_node_index)) = child_ref {
-            // If child node was merged with either its left or right sibliing
-            // then right sibling is moved to its place and child_node_index should
-            // keep looking start next iteration from same position.
-            if !self.merge_rec(child_node_id, child_node_index)? {
-                child_node_index += 1;
-            }
-            child_ref = {
-                let node = self.nodes.get(&node_id).expect("node");
-                node.next_dirty_child(child_node_index)
-            };
-        }
-
-        let node = self.nodes.get(&node_id).expect("tx node");
-        let page_size = self.state.node_manager.page_size();
-        let merge_threshold = page_size / 4;
-        if node.size() < merge_threshold || !node.has_min_keys() {
-            self.merge_inner(node_id, node_index)?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-        // match node {
-        //     InternalNodes::Branch(nodes) => {
-        //         // println!("Branch = {node_id}");
-        //         // let mut children_ids = Vec::new();
-        //         // for n in nodes {
-        //         //     println!("\t{key:?} ->\t{child_node_id:?}",
-        //         //         key = String::from_utf8_lossy(&n.key),
-        //         //         child_node_id = n.node_id,
-        //         //     );
-
-        //         //     if let NodeId::Id(id) = n.node_id {
-        //         //         children_ids.push(id);
-        //         //     }
-        //         // }
-
-        //         // // let children_ids = children.remove(&node_id).expect("children");
-        //         // for c in children_ids {
-        //         //     self.rebalance(c);
-        //         // }
-
-        //         // 1. Rebalance children
-        //         // 2. Split/merge itself
-        //     }
-        //     InternalNodes::Leaf(nodes) => {
-        //         // println!("Leaf = {node_id}");
-        //         // for n in nodes {
-        //         //     println!("\t{key:?} ->\t{value:?}",
-        //         //         key = String::from_utf8_lossy(&n.key),
-        //         //         value = String::from_utf8_lossy(&n.value),
-        //         //     );
-        //         // }
-
-        //         // Split/merge itself
-        //     }
-        // }
-    }
-
-    fn merge_inner(&mut self, node_id: u64, node_index: usize) -> Result<()> {
+    fn merge_node(&mut self, node_id: u64, node_index: usize) -> Result<()> {
         let is_root = self
             .parent
             .contains_key(&node_id)
@@ -348,16 +311,18 @@ impl WriteTransaction {
         if is_root {
             let root = self.nodes.get_mut(&node_id).expect("root node");
 
+            if root.len() == 0 {
+                let parent = InternalNodes::Leaf(Vec::new());
+                let parent_id = self.insert_new(parent);
+                self.root_node_id = NodeId::Id(parent_id);
+                return Ok(());
+            }
+
             // If root node is a branch and only has one child node then collapse it.
-            let new_root_id = if let InternalNodes::Branch(nodes) = root {
-                if nodes.len() == 1 {
-                    nodes[0].node_id.id().into()
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+            let new_root_id = root
+                .as_branch()
+                .filter(|nodes| nodes.len() == 1)
+                .map(|nodes| nodes[0].node_id.id());
 
             if let Some(new_root_id) = new_root_id {
                 self.root_node_id = NodeId::Id(new_root_id);
@@ -365,12 +330,9 @@ impl WriteTransaction {
                 assert_eq!(parent, Some(node_id));
                 let removed = self.nodes.remove(&node_id).is_some();
                 assert!(removed, "root node must be removed");
-                // let children = self.children.remove(&node_id);
-                // assert_eq!(children, Some(vec![new_root_id]));
             }
             return Ok(());
         }
-
 
         // If node has no children then remove it
         let parent_id = *self.parent.get(&node_id).expect("node parent");
@@ -381,12 +343,9 @@ impl WriteTransaction {
                 assert!(removed, "parent node must be removed");
                 let removed = self.nodes.remove(&node_id).is_some();
                 assert!(removed, "empty node must be removed");
-
-                // let children = self.children.get_mut(&parent_id).expect("children");
-                // let index = children.iter()
-                //     .position(|child_id| *child_id == node_id)
-                //     .expect("node child");
-                // children.swap_remove(index);
+                self.nodes
+                    .get_mut(&parent_id).expect("parent")
+                    .remove_child_at(node_index);
                 return Ok(())
             }
         }
@@ -442,25 +401,84 @@ impl WriteTransaction {
         Ok(())
     }
 
-    fn split(&mut self, _node_id: u64) -> Result<()> {
-        // // If we have at least the minimum number of keys and adding another
-        // // node would put us over the threshold then exit and return.
-        // if i >= minKeysPerPage && sz+elsize > threshold {
-        //     break
-        // }
-        todo!()
+    fn traverse_split(&mut self, node_id: u64, node_index: usize) -> Result<usize> {
+        let mut child_ref = {
+            let node = self.nodes.get(&node_id).expect("node");
+            node.next_dirty_child(0)
+        };
+
+        while let Some((child_node_id, mut child_node_index)) = child_ref {
+            let split_nodes_count = self.traverse_split(child_node_id, child_node_index)?;
+            child_node_index += split_nodes_count;
+            child_ref = {
+                let node = self.nodes.get(&node_id).expect("node");
+                node.next_dirty_child(child_node_index)
+            };
+        }
+
+        let node = self.nodes.get(&node_id).expect("tx node");
+        let page_size = self.state.node_manager.page_size();
+        let node_size = node.size();
+        let node_len = node.len();
+        if node_size > page_size && node_len >= (MIN_KEYS_PER_PAGE*2) {
+            let split_nodes_count = self.split_node(node_id, node_index)?;
+            Ok(split_nodes_count)
+        } else {
+            Ok(1)
+        }
+    }
+
+    fn split_node(&mut self, node_id: u64, node_index: usize) -> Result<usize> {
+        let page_size = self.state.node_manager.page_size();
+        let nodes = self
+            .nodes
+            .remove(&node_id)
+            .expect("split node")
+            .split(page_size as usize);
+
+        let parent_id = if let Some(parent_id) = self.parent.get(&node_id).copied() {
+            let removed = self.parent.remove(&node_id).is_some();
+            assert!(removed, "parent node must be present");
+            parent_id
+        } else {
+            let parent = InternalNodes::Branch(Vec::new());
+            let parent_id = self.insert_new(parent);
+            self.root_node_id = NodeId::Id(parent_id);
+            parent_id
+        };
+
+        let child_nodes = nodes
+            .into_iter()
+            .map(|node| {
+                let key = node.key_at(0).to_vec();
+                let child_id = self.insert_new(node);
+                self.insert_parent(child_id, parent_id);
+                BranchInternalNode {
+                    node_id: NodeId::Id(child_id),
+                    key,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let child_nodes_len = child_nodes.len();
+        let parent = self.nodes.get_mut(&parent_id).expect("parent");
+        parent.splice(node_index, child_nodes);
+        Ok(child_nodes_len)
     }
 
     fn get_child_at_index(&mut self, node_id: u64, child_index: usize) -> Result<u64> {
         let node = self.nodes.get(&node_id).expect("node must exist");
         let InternalNodes::Branch(nodes) = node else {
-            panic!("must be branch node");
+            panic!("expect branch node");
         };
 
         match nodes[child_index].node_id {
             NodeId::Id(child_node_id) => Ok(child_node_id),
             NodeId::Address(page_address) => {
-                let node = self.state.node_manager.read_node(page_address)?
+                let node = self
+                    .state
+                    .node_manager
+                    .read_node(page_address)?
                     .as_ref().clone();
 
                 let child_node_id = self.insert_new(node);
@@ -481,7 +499,6 @@ impl WriteTransaction {
     fn insert_parent(&mut self, child_id: u64, parent_id: u64) {
         let added = self.parent.insert(child_id, parent_id).is_none();
         assert!(added, "replacing existing child parent mapping");
-        // self.children.entry(parent_id).or_default().push(child_id);
     }
 }
 
@@ -498,495 +515,3 @@ impl Update {
         }
     }
 }
-
-// pub struct ReadTransaction {
-//     state: Arc<DatabaseState>,
-// }
-
-// impl ReadTransaction {
-//     fn get(&self, key: &[u8]) -> Option<&[u8]> {
-//         todo!()
-//     }
-// }
-
-// impl<'a> NodeGetter<'a, NodeRef<'a>> for WriteTransaction {
-//     fn get_node(&'a self, page_id: PageId) -> Result<NodeRef<'a>> {
-//         let node_ref= if let Some(node) = self.nodes.get(&page_id) {
-//             NodeRef::Ref(node)
-//         } else {
-//             NodeRef::Arc(self.state.node_getter.get_node(page_id)?.clone())
-//         };
-//         Ok(node_ref)
-//     }
-// }
-
-// enum NodeRef<'a> {
-//     Ref(&'a Node),
-//     Arc(Arc<Node>),
-// }
-
-// impl<'a> AsRef<Node> for NodeRef<'a> {
-//     fn as_ref(&self) -> &Node {
-//         match self {
-//             Self::Ref(node) => node,
-//             Self::Arc(node) => node.as_ref(),
-//         }
-//     }
-// }
-
-// impl WriteTransaction {
-//     fn get(&self, key: &[u8]) -> Result<Option<Value>> {
-//         if let Some(pending_value) = self.pending.get(key) {
-//             return Ok(pending_value.clone())
-//         }
-
-//         let node_location = find_node(key, self.meta.root_node, &self.state.as_ref().node_getter)?;
-//         if !node_location.exact_match {
-//             return Ok(None);
-//         }
-
-//         let node = self
-//             .state
-//             .node_getter
-//             .get_node(node_location.address)?;
-
-//         let InternalNodes::Leaf(ref nodes) = node.as_ref() else {
-//             return Err(anyhow!("corrupted database"));
-//         };
-
-//         let value = nodes[node_location.index].value.clone();
-//         Ok(Some(value))
-//     }
-
-//     fn put(&mut self, key: Key, value: Value) -> Result<()> {
-//         self.pending.insert(key, Some(value));
-//         Ok(())
-//     }
-
-//     fn remove(&mut self, key: &[u8]) {
-//         self.pending.insert(key.to_vec(), None);
-//     }
-
-//     fn commit(self) -> Result<()> {
-//         // apply changes to leaf nodes
-//         let mut pending_tree = Tree::new(self.meta.root_node);
-//         let mut pending_nodes = HashMap::new();
-//         for (key, pending_value) in self.pending {
-//             let node_location = find_node(&key, self.meta.root_node, &self.state.as_ref().node_getter)?;
-//             if pending_value.is_none() && !node_location.exact_match {
-//                 // deleted item does not exist in database
-//                 // so there is nothing to do for this item
-//                 continue;
-//             }
-
-//             let mut entry = pending_nodes.entry(NodeId::Address(node_location.address));
-//             let node = match entry {
-//                 Entry::Occupied(ref mut entry) => entry.get_mut(),
-//                 Entry::Vacant(entry) => {
-//                     let node = self
-//                         .state
-//                         .node_getter
-//                         .get_node(node_location.address)?
-//                         .as_ref()
-//                         .clone();
-
-//                     entry.insert(node)
-//                 }
-//             };
-
-//             let InternalNodes::Leaf(ref mut nodes) = node else {
-//                 return Err(anyhow!("database is corrupted"));
-//             };
-
-//             pending_tree.insert_path(node_location.path);
-
-//             if let Some(new_value) = pending_value {
-//                 // upsert item
-//                 if node_location.exact_match {
-//                     nodes[node_location.index].value = new_value;
-//                 } else {
-//                     nodes.insert(node_location.index, LeafInternalNode {
-//                         key,
-//                         value: new_value,
-//                     });
-//                 }
-//             } else {
-//                 // delete item
-//                 nodes.remove(node_location.index);
-//             }
-//         }
-
-//         // fetch pending branch nodes
-//         pending_tree.for_each(|tree_node| {
-//             if pending_nodes.contains_key(&tree_node.node_id) {
-//                 return Ok(());
-//             }
-//             let node = self.state
-//                 .node_getter
-//                 .get_node(tree_node.node_id.address())?
-//                 .as_ref()
-//                 .clone();
-//             pending_nodes.insert(tree_node.node_id, node);
-//             Ok(())
-//         })?;
-
-//         // merge nodes that are too small
-//         // pending_tree.merge(&mut pending_nodes, self.state.as_ref());
-
-//         // split nodes that are too large
-//         pending_tree.split(self.state.as_ref());
-
-//         // TODO: write nodes to file
-//         Ok(())
-//     }
-
-//     fn rollback(self) {
-//         todo!()
-//     }
-// }
-
-// pub struct ReadTransaction {
-//     id: TransactionId,
-//     root: Address,
-//     meta: MetaNode,
-//     state: Arc<DatabaseState>,
-// }
-
-// impl ReadTransaction {
-//     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-//         let node_location =
-//             find_node(key, self.meta.root_node, &self.state.node_getter)?;
-//         if !node_location.exact_match {
-//             return Ok(None);
-//         }
-
-//         let node = self
-//             .state
-//             .node_getter
-//             .get_node(node_location.address)?;
-
-//         let InternalNodes::Leaf(ref nodes) = node.as_ref() else {
-//             return Err(anyhow!("corrupted database"));
-//         };
-
-//         let value = nodes[node_location.index].value.clone();
-//         Ok(Some(value))
-//     }
-
-//     fn close(self) {
-//         todo!()
-//     }
-// }
-
-// struct Tree {
-//     root: TreeNode,
-//     // state: Arc<DatabaseState>,
-//     // internal_nodes: HashMap<NodeId, InternalNodes>,
-// }
-
-// struct TreeNode {
-//     node_id: NodeId,
-//     children: HashMap<NodeId, TreeNode>,
-// }
-
-// impl Tree {
-//     fn new(root_node_address: Address) -> Self {
-//         Self {
-//             root: TreeNode {
-//                 node_id: NodeId::Address(root_node_address),
-//                 children: HashMap::default(),
-//             },
-//         }
-//     }
-
-//     fn insert_path(&mut self, mut path: Vec<Address>) {
-//         path.reverse();
-//         let root_address = path.pop().expect("path not empty");
-//         assert_eq!(root_address, self.root.node_id.address());
-//         let mut children = &mut self.root.children;
-//         while let Some(address) = path.pop() {
-//             let node_id = NodeId::Address(address);
-//             children = &mut children
-//                 .entry(node_id)
-//                 .or_insert_with(|| TreeNode {
-//                     node_id: NodeId::Address(address),
-//                     children: HashMap::default(),
-//                 })
-//                 .children;
-//         }
-//     }
-
-//     fn merge(&mut self, nodes: &mut HashMap<NodeId, InternalNodes>, remove_nodes: &mut HashSet<Address>, state: &DatabaseState) -> Result<()> {
-//         let _ = Self::merge_internal(&mut self.root, nodes, remove_nodes, state)?;
-//         Ok(())
-//     }
-
-//     fn merge_internal(
-//         tree_node: &mut TreeNode,
-//         nodes: &mut HashMap<NodeId, InternalNodes>,
-//         remove_nodes: &mut HashSet<Address>,
-//         state: &DatabaseState,
-//     ) -> Result<()> {
-//         for (_, child_node) in tree_node.children.iter_mut() {
-//             Self::merge_internal(child_node, nodes, remove_nodes, state)?;
-//         }
-
-//         let threshold = state.page_size / 4;
-//         let mut child_node_ids = tree_node
-//             .children
-//             .iter()
-//             .map(|(node_id, _)| *node_id)
-//             .collect::<Vec<_>>();
-
-//         while let Some(child_node_id) = child_node_ids.pop() {
-//             let child_node = nodes.get_mut(&child_node_id).expect("pending node");
-//             if child_node.size() > threshold && child_node.has_min_keys() {
-//                 continue;
-//             }
-
-//             // No children, just remove the node
-//             if child_node.size() == 0 {
-//                 let removed = tree_node.children.remove(&child_node_id).is_some();
-//                 assert!(removed);
-//                 let removed = nodes.get_mut(&tree_node.node_id)
-//                     .expect("merge parent node")
-//                     .remove(&child_node_id);
-//                 // let removed = child_node.remove(&child_node_id);
-//                 assert!(removed);
-//                 remove_nodes.insert(child_node_id.address());
-//                 continue;
-//             }
-
-
-//         }
-
-
-//         // let threshold = state.page_size / 4;
-//         // for child_node_id in child_node_ids {
-//         //     let child_node = nodes.get_mut(&child_node_id).expect("pending node");
-//         //     if child_node.size() > threshold && child_node.has_min_keys() {
-//         //         continue;
-//         //     }
-
-//         //     // No children, just remove the node
-//         //     if child_node.size() == 0 {
-//         //         let removed = tree_node.children.remove(&child_node_id).is_some();
-//         //         assert!(removed);
-//         //         let removed = nodes.get_mut(&tree_node.node_id)
-//         //             .expect("merge parent node")
-//         //             .remove(&child_node_id);
-//         //         // let removed = child_node.remove(&child_node_id);
-//         //         assert!(removed);
-//         //         remove_nodes.insert(child_node_id.address());
-//         //         continue;
-//         //     }
-
-//         //     // assert!()
-
-//         //     // find sibling to merge with
-//         //     let internal_nodes = nodes.get_mut(&tree_node.node_id)
-//         //         .expect("merge parent node");
-//         //     let child_index = internal_nodes.index_of(&child_node_id).expect("child index");
-//         //     let target_index = if child_index == 0 {
-//         //         child_index + 1
-//         //     } else {
-//         //         child_index - 1
-//         //     };
-//         //     // Self::merge_internal(child_node, nodes, state)?;
-//         //     // check if node is too small a
-//         // }
-
-//         todo!()
-//     }
-
-//     fn split(&mut self, state: &DatabaseState) {
-//     }
-
-//     fn for_each<F: FnMut(&TreeNode) -> Result<()>>(&self, mut f: F) -> Result<()> {
-//         f(&self.root)?;
-//         for_each(&self.root, &mut f)
-//     }
-// }
-
-// fn for_each<F: FnMut(&TreeNode) -> Result<()>>(node: &TreeNode, f: &mut F) -> Result<()> {
-//     for (_, child_node) in node.children.iter() {
-//         f(child_node)?;
-//         for_each(child_node, f)?;
-//     }
-//     Ok(())
-// }
-
-// struct Rebalancer {
-//     tree: Tree,
-//     pending_nodes: HashMap<NodeId, InternalNodes>,
-//     free_nodes: HashSet<Address>,
-//     state: Arc<DatabaseState>,
-//     id: u64,
-// }
-
-// #[derive(Clone, Copy)]
-// enum ChildMergeResult {
-//     Continue,
-//     Remove,
-//     ReplaceWith(NodeId),
-// }
-
-// impl Rebalancer {
-//     fn merge(&mut self, tree: &mut Tree) -> Result<()> {
-//         let _ = self.merge_internal(&mut tree.root)?;
-//         Ok(())
-//     }
-
-//     fn merge_internal(
-//         &mut self,
-//         tree_node: &mut TreeNode,
-//         // nodes: &mut HashMap<NodeId, InternalNodes>,
-//         // remove_nodes: &mut HashSet<Address>,
-//         // state: &DatabaseState,
-//     ) -> Result<ChildMergeResult> {
-//         let mut merge_results = Vec::new();
-//         for (child_node_id, child_node) in tree_node.children.iter_mut() {
-//             merge_results.push((*child_node_id, self.merge_internal(child_node)?));
-//         }
-
-//         for (child_node_id, merge_result) in merge_results {
-//             match merge_result {
-//                 ChildMergeResult::Continue => {},
-//                 ChildMergeResult::Remove => {
-//                     let removed = tree_node.children.remove(&child_node_id).is_some();
-//                     assert!(removed);
-//                 },
-//                 ChildMergeResult::ReplaceWith(node_id) => {
-//                     let removed = tree_node.children.remove(&child_node_id).is_some();
-//                     assert!(removed);
-//                 },
-//             };
-//         }
-
-//         let threshold = self.state.page_size / 4;
-//         let mut child_node_ids = tree_node
-//             .children
-//             .iter()
-//             .map(|(node_id, _)| *node_id)
-//             .collect::<Vec<_>>();
-
-//         let internal_nodes = self.pending_nodes
-//             .remove(&tree_node.node_id)
-//             .expect("merge parent node");
-
-//         while let Some(child_node_id) = child_node_ids.pop() {
-//             let child_node = self
-//                 .pending_nodes
-//                 .get_mut(&child_node_id)
-//                 .expect("pending node");
-
-//             if child_node.size() > threshold && child_node.has_min_keys() {
-//                 // Child no is occupying enough space and has enough entries
-//                 // to stay as and should not be merged.
-//                 continue;
-//             }
-
-//             if child_node.size() == 0 {
-//                 // Child node has no children, just remove the node
-//                 let removed = tree_node.children.remove(&child_node_id).is_some();
-//                 assert!(removed);
-//                 let removed = self.pending_nodes
-//                     .get_mut(&tree_node.node_id)
-//                     .expect("merge parent node")
-//                     .remove(&child_node_id);
-//                 assert!(removed);
-//                 self.free_nodes.insert(child_node_id.address());
-//                 continue;
-//             }
-
-//             if internal_nodes.len() < 2 {
-//                 break;
-//             }
-
-//             // find sibling to merge with
-//             let child_index = internal_nodes
-//                 .index_of(&child_node_id)
-//                 .expect("child index");
-
-//             let target_index = if child_index == 0 {
-//                 child_index + 1
-//             } else {
-//                 child_index - 1
-//             };
-
-//             // get node at target_index
-//             // merge child node and target node into new node
-//             // free child and target nodes
-//         }
-
-//         let result = if internal_nodes.size() == 0 {
-//             // Current node is empty and should be deleted from its parent
-//             ChildMergeResult::Remove
-//         } else if internal_nodes.len() == 1 {
-//             if let Some(first_child) = internal_nodes.first_child() {
-//                 // Current branch node should be replaced by its single child
-//                 ChildMergeResult::ReplaceWith(first_child.node_id)
-//             } else {
-//                 ChildMergeResult::Continue
-//             }
-//         } else {
-//             ChildMergeResult::Continue
-//         };
-
-//         self.pending_nodes.insert(tree_node.node_id, internal_nodes);
-//         Ok(result)
-
-
-//         //     // No children, just remove the node
-//         //     if child_node.size() == 0 {
-//         //         let removed = tree_node.children.remove(&child_node_id).is_some();
-//         //         assert!(removed);
-//         //         let removed = nodes.get_mut(&tree_node.node_id)
-//         //             .expect("merge parent node")
-//         //             .remove(&child_node_id);
-//         //         // let removed = child_node.remove(&child_node_id);
-//         //         assert!(removed);
-//         //         remove_nodes.insert(child_node_id.address());
-//         //         continue;
-//         //     }
-
-//         //     // assert!()
-
-//         //     // find sibling to merge with
-//         //     let internal_nodes = nodes.get_mut(&tree_node.node_id)
-//         //         .expect("merge parent node");
-//         //     let child_index = internal_nodes.index_of(&child_node_id).expect("child index");
-//         //     let target_index = if child_index == 0 {
-//         //         child_index + 1
-//         //     } else {
-//         //         child_index - 1
-//         //     };
-//         //     // Self::merge_internal(child_node, nodes, state)?;
-//         //     // check if node is too small a
-//         // }
-
-//         // todo!()
-//     }
-// }
-
-// // struct Rebalance {
-// //     pending_tree: Tree<PageId>,
-// //     pending_nodes: HashMap<PageId, InternalNodes>,
-// // }
-
-// // impl Rebalance {
-// //     fn rebalance(&mut self, parent: Option<PageId>, node: &PageId) {
-// //         // rebalance child nodes
-// //         // TODO
-
-// //         let Some(parent) = parent else {
-// //             todo!()
-// //             // handle parent node update
-// //         };
-
-// //         // node has to be merged
-// //         // if it has too few children or its size is less than page_size*0.25
-
-// //         // node has to be split, otherwise
-// //     }
-// // }

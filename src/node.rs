@@ -15,6 +15,8 @@ use crate::{
 const BRANCH_NODE: u16 = 1;
 const LEAF_NODE: u16 = 2;
 
+pub const MIN_KEYS_PER_PAGE: usize = 2;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BranchInternalNode {
     pub key: Vec<u8>,
@@ -38,7 +40,6 @@ impl BranchInternalNode {
         key.resize(key_len, 0);
         reader.read_exact(&mut key)?;
         Ok(Self {
-            // node_id: NodeId::Address(address),
             key,
             node_id: NodeId::Address(address),
         })
@@ -203,14 +204,15 @@ pub enum InternalNodes {
 
 impl InternalNodes {
     pub fn size(&self) -> u32 {
-        match self {
+        let nodes_size: u32 = match self {
             Self::Branch(nodes) => {
                 nodes.iter().map(|node| node.size() as u32).sum()
             },
             Self::Leaf(nodes) => {
                 nodes.iter().map(|node| node.size() as u32).sum()
             },
-        }
+        };
+        (NodeHeader::size() as u32) + nodes_size
     }
 
     pub fn len(&self) -> usize {
@@ -268,6 +270,13 @@ impl InternalNodes {
         nodes.remove(index);
     }
 
+    pub fn as_branch(&self) -> Option<&Vec<BranchInternalNode>> {
+        let Self::Branch(ref nodes) = self else {
+            return None;
+        };
+        Some(nodes)
+    }
+
     pub fn merge(&mut self, other: InternalNodes) {
         match (self, other) {
             (
@@ -284,6 +293,65 @@ impl InternalNodes {
             }
             _ => panic!("incompatible nodes"),
         }
+    }
+
+    pub fn splice(&mut self, index: usize, child_nodes: Vec<BranchInternalNode>) {
+        let Self::Branch(nodes) = self else {
+            panic!("splicing leaf");
+        };
+
+        if nodes.is_empty() && index == 0 {
+            *nodes = child_nodes;
+        } else {
+            nodes.splice(index..index+1, child_nodes);
+        }
+    }
+
+    pub fn split(self, threshold: usize) -> Vec<Self> {
+        match self {
+            Self::Branch(nodes) => Self::split_branch(nodes, threshold),
+            Self::Leaf(nodes) => Self::split_leaf(nodes, threshold),
+        }
+    }
+
+    fn split_branch(mut internal_nodes: Vec<BranchInternalNode>, threshold: usize) -> Vec<Self> {
+        let mut result = Vec::new();
+        let mut size = NodeHeader::size();
+        let mut new_node = Vec::new();
+        for internal_node in internal_nodes.drain(..) {
+            if size + internal_node.size() > threshold && new_node.len() >= MIN_KEYS_PER_PAGE {
+                result.push(Self::Branch(std::mem::take(&mut new_node)));
+                size = NodeHeader::size();
+            }
+            size += internal_node.size();
+            new_node.push(internal_node);
+        }
+
+        if !new_node.is_empty() {
+            result.push(Self::Branch(new_node));
+        }
+
+        result
+    }
+
+    fn split_leaf(mut internal_nodes: Vec<LeafInternalNode>, threshold: usize) -> Vec<Self> {
+        let mut result = Vec::new();
+        let mut size = NodeHeader::size();
+        let mut new_node = Vec::new();
+        for internal_node in internal_nodes.drain(..) {
+            if size + internal_node.size() > threshold && new_node.len() >= MIN_KEYS_PER_PAGE {
+                result.push(Self::Leaf(std::mem::take(&mut new_node)));
+                size = NodeHeader::size();
+            }
+            size += internal_node.size();
+            new_node.push(internal_node);
+        }
+
+        if !new_node.is_empty() {
+            result.push(Self::Leaf(new_node));
+        }
+
+        result
     }
 
     pub fn read<R: Read>(reader: &mut R) -> Result<Self> {
@@ -428,22 +496,6 @@ struct Files {
     files_len: usize,
     files: Vec<File>,
 }
-
-// pub trait NodeGetter<'a, N: AsRef<InternalNodes> + 'a>  {
-//     fn get_node(&'a self, page_id: Address) -> Result<N>;
-// }
-
-// impl<'a> NodeGetter<'a, Arc<InternalNodes>> for FileNodeAccessor {
-//     fn get_node(&'a self, page_id: Address) -> Result<Arc<InternalNodes>> {
-//         let node = self.nodes_cache.get(&page_id);
-//         if let Some(node) = node {
-//             return Ok(node);
-//         }
-//         let node = Arc::new(self.read_node(page_id)?);
-//         self.nodes_cache.insert(page_id, node.clone());
-//         Ok(node)
-//     }
-// }
 
 #[derive(Clone, Debug)]
 pub enum Node<'a> {

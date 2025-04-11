@@ -2,7 +2,7 @@ use anyhow::Result;
 use bonsai_db::{
     node::{BranchInternalNode, InternalNodes, LeafInternalNode, NodeId, NodeManager}, DatabaseState,
 };
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 fn setup_test_for_cursor() -> Result<()> {
     let path = "./my.db";
@@ -151,37 +151,49 @@ fn run_get_put_test() -> Result<()> {
     let db = create_test_database()?;
     let mut tx = db.begin_write();
 
-    // tx.put(b"key0", b"value0a")?;
-    // tx.put(b"key10a", b"value10a")?;
-    // tx.put(b"key12a", b"value12a")?;
-    // tx.put(b"key20a", b"value20a")?;
-    // tx.put(b"key22a", b"value22a")?;
-    // tx.put(b"key30a", b"value20a")?;
-    // tx.put(b"key32a", b"value22a")?;
-    // tx.put(b"key40a", b"value40a")?;
+    for i in 0..30 {
+        let key = format!("key0000_{i}");
+        let value = format!("value_{i}");
+        tx.put(key.as_bytes(), value.as_bytes())?;
+    }
 
-    // tx.remove(b"key0")?;
+    // tx.put(b"key_00000", b"value0a")?;
+    // tx.put(b"key_00010a", b"value10a")?;
+    // tx.put(b"key_00012a", b"value12a")?;
+    // tx.put(b"key_00020a", b"value20a")?;
+    // tx.put(b"key_00022a", b"value22a")?;
+    // tx.put(b"key_00030a", b"value20a")?;
+    // tx.put(b"key_00032a", b"value22a")?;
+    // tx.put(b"key_00040a", b"value40a")?;
+
+    tx.remove(b"key0")?;
     tx.remove(b"key10")?;
-    // tx.remove(b"key12")?;
+    tx.remove(b"key12")?;
     tx.remove(b"key20")?;
-    // tx.remove(b"key22")?;
+    tx.remove(b"key22")?;
     tx.remove(b"key30")?;
-    // tx.remove(b"key32")?;
-    // tx.remove(b"key40")?;
+    tx.remove(b"key32")?;
+    tx.remove(b"key40")?;
 
-    // let mut cursor = tx.cursor()?;
-    // //let mut cursor = Cursor::new(0, Arc::new(node_manager))?;
-    // while cursor.is_valid() {
-    //     println!(
-    //         "{:?} = {:?}",
-    //         String::from_utf8_lossy(cursor.key()),
-    //         String::from_utf8_lossy(cursor.value()),
-    //     );
-    //     cursor.next()?;
-    // }
-
-    tx.merge()?;
     tx.traverse();
+    tx.merge()?;
+    println!("\n======\n");
+    tx.traverse();
+    tx.split()?;
+    println!("\n======\n");
+    tx.traverse();
+
+    println!("\n======\n");
+    let mut cursor = tx.cursor()?;
+    //let mut cursor = Cursor::new(0, Arc::new(node_manager))?;
+    while cursor.is_valid() {
+        println!(
+            "{:?} = {:?}",
+            String::from_utf8_lossy(cursor.key()),
+            String::from_utf8_lossy(cursor.value()),
+        );
+        cursor.next()?;
+    }
 
     Ok(())
 }
@@ -193,6 +205,9 @@ fn main() {
     run_cursor_seek().expect("cursor seek");
     run_get_put_test().expect("get put");
     // let node_manager = NodeManager::new("./my.db", 10, 128, 1024);
+
+    let mut m = BTreeMap::new();
+    m.insert(10, "test");
 
     // let node = InternalNodes::Leaf(vec![
     //     LeafInternalNode {

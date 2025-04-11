@@ -112,7 +112,7 @@ impl<'a> Cursor<'a> {
 
     pub fn next(&mut self) -> Result<()> {
         let element = self.stack.last_mut().expect("cursor stack top");
-        if element.index < element.node.len()-1 {
+        if !element.node.is_empty() && element.index < element.node.len()-1 {
             assert!(element.node.is_leaf(), "cursor must point to a leaf node");
             element.index += 1;
             return Ok(());
@@ -122,7 +122,7 @@ impl<'a> Cursor<'a> {
             let mut last_index = None;
             for i in (0..self.stack.len()).rev() {
                 let element = &mut self.stack[i];
-                if element.index < element.node.len()-1 {
+                if !element.node.is_empty() && element.index < element.node.len()-1 {
                     element.index += 1;
                     last_index = Some(i);
                     break
