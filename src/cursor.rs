@@ -130,7 +130,7 @@ impl<'a> Cursor<'a> {
             }
 
             let Some(last_index) = last_index else {
-                self.stack.last_mut().expect("cursor stack top").index += 1;
+                // self.stack.last_mut().expect("cursor stack top").index += 1;
                 break;
             };
 

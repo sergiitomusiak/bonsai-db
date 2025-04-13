@@ -4,24 +4,26 @@ use std::ops::Not;
 use std::sync::Arc;
 use crate::cursor::Cursor;
 use crate::node::{InternalNodes, BranchInternalNode, LeafInternalNode, Node, NodeId, NodeReader, MIN_KEYS_PER_PAGE};
-use crate::DatabaseState;
+use crate::{DatabaseInternal, WriterToken};
 
 pub type TransactionId = u64;
 
 pub struct WriteTransaction {
     // meta: MetaNode,
-    state: Arc<DatabaseState>,
+    database: Arc<DatabaseInternal>,
     next_node_id: u64,
     nodes: HashMap<u64, InternalNodes>,
     parent: HashMap<u64, u64>,
     root_node_id: NodeId,
+    pending_free_pages: Vec<u64>,
+    writer_token: Option<WriterToken>,
 }
 
 impl NodeReader for WriteTransaction {
     fn read_node<'a>(&'a self, node_id: NodeId) -> Result<Node<'a>> {
         let node = match node_id {
             NodeId::Address(address) => {
-                Node::ReadOnly(self.state.node_manager.read_node(address)?)
+                Node::ReadOnly(self.database.node_manager.read_node(address)?)
             },
             NodeId::Id(node_id) => {
                 let node = self.nodes.get(&node_id).expect("tx nodes");
@@ -33,13 +35,15 @@ impl NodeReader for WriteTransaction {
 }
 
 impl WriteTransaction {
-    pub fn new(state: Arc<DatabaseState>, root_node_id: NodeId) -> Self {
+    pub fn new(database: Arc<DatabaseInternal>, root_node_address: u64, writer_token: WriterToken) -> Self {
         Self {
-            state,
+            database,
             next_node_id: 1,
             nodes: HashMap::new(),
             parent: HashMap::new(),
-            root_node_id,
+            root_node_id: NodeId::Address(root_node_address),
+            pending_free_pages: Vec::new(),
+            writer_token: Some(writer_token),
         }
     }
 
@@ -152,7 +156,7 @@ impl WriteTransaction {
         }
 
         let node = self.nodes.get(&node_id).expect("tx node");
-        let page_size = self.state.node_manager.page_size();
+        let page_size = self.database.node_manager.page_size();
         let merge_threshold = page_size / 4;
         if node.size() < merge_threshold || !node.has_min_keys() {
             self.merge_node(node_id, node_index)?;
@@ -182,7 +186,7 @@ impl WriteTransaction {
         while let Some(node_ref) = stack.pop() {
             match &node_ref.node {
                 Node::ReadOnly(node) => {
-                    new_dirty_nodes.push((node_ref.index, node.as_ref().clone()));
+                    new_dirty_nodes.push((node_ref.index, node_ref.node_id.node_address(), node.as_ref().clone()));
                 }
                 Node::Dirty(_) => {
                     existing_dirty_nodes.push((node_ref.index, node_ref.node_id.id()));
@@ -203,6 +207,9 @@ impl WriteTransaction {
             }
         }
 
+        self.pending_free_pages.extend(
+            new_dirty_nodes.iter().map(|(_, node_address, _)| *node_address),
+        );
         new_dirty_nodes.reverse();
         existing_dirty_nodes.reverse();
 
@@ -219,7 +226,7 @@ impl WriteTransaction {
             };
             (index, nodes, node_id)
         } else {
-            let (index, node) = new_dirty_nodes
+            let (index, _node_address, node) = new_dirty_nodes
                 .pop()
                 .ok_or_else(|| anyhow!("database is corrupted"))?;
             let node_id = self.insert_new(node);
@@ -238,7 +245,7 @@ impl WriteTransaction {
                     false
                 } else {
                     nodes.insert(index, LeafInternalNode { key: key.to_vec(), value: value.to_vec() });
-                    true
+                    index == 0
                 }
             }
             Update::Delete(_) => {
@@ -251,7 +258,7 @@ impl WriteTransaction {
 
         // Create new dirty branch nodes with potentially updated key item
         let mut update_branch_key = items_shifted && index == 0;
-        while let Some((index, mut node)) = new_dirty_nodes.pop() {
+        while let Some((index, _node_address, mut node)) = new_dirty_nodes.pop() {
             let InternalNodes::Branch(ref mut nodes) = node else {
                 panic!("expected branch node");
             };
@@ -417,7 +424,7 @@ impl WriteTransaction {
         }
 
         let node = self.nodes.get(&node_id).expect("tx node");
-        let page_size = self.state.node_manager.page_size();
+        let page_size = self.database.node_manager.page_size();
         let node_size = node.size();
         let node_len = node.len();
         if node_size > page_size && node_len >= (MIN_KEYS_PER_PAGE*2) {
@@ -429,7 +436,7 @@ impl WriteTransaction {
     }
 
     fn split_node(&mut self, node_id: u64, node_index: usize) -> Result<usize> {
-        let page_size = self.state.node_manager.page_size();
+        let page_size = self.database.node_manager.page_size();
         let nodes = self
             .nodes
             .remove(&node_id)
@@ -476,7 +483,7 @@ impl WriteTransaction {
             NodeId::Id(child_node_id) => Ok(child_node_id),
             NodeId::Address(page_address) => {
                 let node = self
-                    .state
+                    .database
                     .node_manager
                     .read_node(page_address)?
                     .as_ref().clone();
@@ -499,6 +506,12 @@ impl WriteTransaction {
     fn insert_parent(&mut self, child_id: u64, parent_id: u64) {
         let added = self.parent.insert(child_id, parent_id).is_none();
         assert!(added, "replacing existing child parent mapping");
+    }
+}
+
+impl Drop for WriteTransaction {
+    fn drop(&mut self) {
+        self.database.release_writer_token(self.writer_token.take().expect("writer tx must own writer token"));
     }
 }
 

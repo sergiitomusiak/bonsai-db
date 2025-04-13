@@ -315,10 +315,14 @@ impl InternalNodes {
     }
 
     fn split_branch(mut internal_nodes: Vec<BranchInternalNode>, threshold: usize) -> Vec<Self> {
+        if internal_nodes.len() <= MIN_KEYS_PER_PAGE {
+            return vec![Self::Branch(internal_nodes)];
+        }
         let mut result = Vec::new();
         let mut size = NodeHeader::size();
         let mut new_node = Vec::new();
-        for internal_node in internal_nodes.drain(..) {
+        let drain_len = internal_nodes.len()-MIN_KEYS_PER_PAGE;
+        for internal_node in internal_nodes.drain(..drain_len) {
             if size + internal_node.size() > threshold && new_node.len() >= MIN_KEYS_PER_PAGE {
                 result.push(Self::Branch(std::mem::take(&mut new_node)));
                 size = NodeHeader::size();
@@ -327,18 +331,20 @@ impl InternalNodes {
             new_node.push(internal_node);
         }
 
-        if !new_node.is_empty() {
-            result.push(Self::Branch(new_node));
-        }
-
+        new_node.append(&mut internal_nodes);
+        result.push(Self::Branch(new_node));
         result
     }
 
     fn split_leaf(mut internal_nodes: Vec<LeafInternalNode>, threshold: usize) -> Vec<Self> {
+        if internal_nodes.len() <= MIN_KEYS_PER_PAGE {
+            return vec![Self::Leaf(internal_nodes)];
+        }
         let mut result = Vec::new();
         let mut size = NodeHeader::size();
         let mut new_node = Vec::new();
-        for internal_node in internal_nodes.drain(..) {
+        let drain_len = internal_nodes.len()-MIN_KEYS_PER_PAGE;
+        for internal_node in internal_nodes.drain(..drain_len) {
             if size + internal_node.size() > threshold && new_node.len() >= MIN_KEYS_PER_PAGE {
                 result.push(Self::Leaf(std::mem::take(&mut new_node)));
                 size = NodeHeader::size();
@@ -347,10 +353,8 @@ impl InternalNodes {
             new_node.push(internal_node);
         }
 
-        if !new_node.is_empty() {
-            result.push(Self::Leaf(new_node));
-        }
-
+        new_node.append(&mut internal_nodes);
+        result.push(Self::Leaf(new_node));
         result
     }
 
@@ -533,17 +537,19 @@ pub struct NodeManager {
     files: Mutex<Files>,
     files_condvar: Condvar,
     page_size: u32,
+    initial_alignment: u64,
     // nodes_cache: moka::sync::Cache<Address, Arc<InternalNodes>>,
 }
 
 impl NodeManager {
-    pub fn new(file_path: impl AsRef<Path>, max_files: usize, page_size: u32) -> Self {
+    pub fn new(file_path: impl AsRef<Path>, max_files: usize, page_size: u32, initial_alignment: u64) -> Self {
         Self {
             file_path: file_path.as_ref().to_path_buf(),
             max_files,
             files: Mutex::default(),
             files_condvar: Condvar::new(),
             page_size,
+            initial_alignment,
             // nodes_cache: moka::sync::Cache::builder()
             //     .weigher(|_, node: &Arc<InternalNodes>| node.size())
             //     .max_capacity(cache_size as u64)
@@ -553,7 +559,7 @@ impl NodeManager {
 
     pub fn write_node(&self, page_id: Address, node: &InternalNodes) -> Result<()> {
         let mut file = self.get_file()?;
-        file.seek(SeekFrom::Start(page_id as u64 * self.page_size as u64))?;
+        file.seek(SeekFrom::Start(self.initial_alignment + page_id as u64 * self.page_size as u64))?;
         let node = node.write(&mut file, self.page_size as usize)?;
         self.release_file(file);
         Ok(node)
@@ -561,7 +567,7 @@ impl NodeManager {
 
     pub fn read_node(&self, page_id: Address) -> Result<Arc<InternalNodes>> {
         let mut file = self.get_file()?;
-        file.seek(SeekFrom::Start(page_id as u64 * self.page_size as u64))?;
+        file.seek(SeekFrom::Start(self.initial_alignment  + page_id as u64 * self.page_size as u64))?;
         let node = InternalNodes::read(&mut file)?;
         self.release_file(file);
         Ok(Arc::new(node))
@@ -572,8 +578,8 @@ impl NodeManager {
     }
 
     fn get_file(&self) -> Result<File> {
+        let mut files = self.files.lock().expect("files lock");
         loop {
-            let mut files = self.files.lock().expect("files lock");
             if let Some(file) = files.files.pop() {
                 return Ok(file);
             }
@@ -584,9 +590,8 @@ impl NodeManager {
                 return Ok(file);
             }
 
-            if let Err(e) = self.files_condvar.wait(files) {
-                return Err(anyhow!("{e:?}"));
-            }
+            files = self.files_condvar.wait(files)
+                .map_err(|e| anyhow!("{e:?}"))?;
         }
     }
 

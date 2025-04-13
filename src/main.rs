@@ -1,80 +1,91 @@
 use anyhow::Result;
 use bonsai_db::{
-    node::{BranchInternalNode, InternalNodes, LeafInternalNode, NodeId, NodeManager}, DatabaseState,
+    node::{BranchInternalNode, InternalNodes, LeafInternalNode, NodeId, NodeManager}, Database, DatabaseInternal, Options
 };
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 fn setup_test_for_cursor() -> Result<()> {
     let path = "./my.db";
-    std::fs::File::create(&path)?;
-
-    let node_manager = NodeManager::new("./my.db", 10, 128);
+    let res = std::fs::remove_file(path);
+    println!("Remove file: {res:?}");
+    let _db = Database::open(path, Options {
+        max_files: 10,
+        page_size: 128,
+        cache_size: 1 << 10,
+    })?;
+    // std::fs::File::create(&path)?;
+    // let node_manager = NodeManager::new("./my.db", 10, 128);
 
     // Root
-    let node = InternalNodes::Branch(vec![
-        BranchInternalNode {
-            key: b"key10".to_vec(),
-            node_id: NodeId::Address(1),
-        },
-        BranchInternalNode {
-            key: b"key20".to_vec(),
-            node_id: NodeId::Address(2),
-        },
-        BranchInternalNode {
-            key: b"key30".to_vec(),
-            node_id: NodeId::Address(3),
-        },
-    ]);
-    node_manager.write_node(0, &node)?;
+    // let node = InternalNodes::Branch(vec![
+    //     BranchInternalNode {
+    //         key: b"key10".to_vec(),
+    //         node_id: NodeId::Address(1),
+    //     },
+    //     BranchInternalNode {
+    //         key: b"key20".to_vec(),
+    //         node_id: NodeId::Address(2),
+    //     },
+    //     BranchInternalNode {
+    //         key: b"key30".to_vec(),
+    //         node_id: NodeId::Address(3),
+    //     },
+    // ]);
+    // node_manager.write_node(0, &node)?;
 
-    // Child1
-    let node = InternalNodes::Leaf(vec![
-        LeafInternalNode {
-            key: b"key10".to_vec(),
-            value: b"value10".to_vec(),
-        },
-        LeafInternalNode {
-            key: b"key12".to_vec(),
-            value: b"value12".to_vec(),
-        },
-    ]);
-    node_manager.write_node(1, &node)?;
+    // // Child1
+    // let node = InternalNodes::Leaf(vec![
+    //     LeafInternalNode {
+    //         key: b"key10".to_vec(),
+    //         value: b"value10".to_vec(),
+    //     },
+    //     LeafInternalNode {
+    //         key: b"key12".to_vec(),
+    //         value: b"value12".to_vec(),
+    //     },
+    // ]);
+    // node_manager.write_node(1, &node)?;
 
-    // Child2
-    let node = InternalNodes::Leaf(vec![
-        LeafInternalNode {
-            key: b"key20".to_vec(),
-            value: b"value20".to_vec(),
-        },
-        LeafInternalNode {
-            key: b"key22".to_vec(),
-            value: b"value22".to_vec(),
-        },
-    ]);
-    node_manager.write_node(2, &node)?;
+    // // Child2
+    // let node = InternalNodes::Leaf(vec![
+    //     LeafInternalNode {
+    //         key: b"key20".to_vec(),
+    //         value: b"value20".to_vec(),
+    //     },
+    //     LeafInternalNode {
+    //         key: b"key22".to_vec(),
+    //         value: b"value22".to_vec(),
+    //     },
+    // ]);
+    // node_manager.write_node(2, &node)?;
 
-    // Child3
-    let node = InternalNodes::Leaf(vec![
-        LeafInternalNode {
-            key: b"key30".to_vec(),
-            value: b"value30".to_vec(),
-        },
-        LeafInternalNode {
-            key: b"key32".to_vec(),
-            value: b"value32".to_vec(),
-        },
-    ]);
-    node_manager.write_node(3, &node)?;
+    // // Child3
+    // let node = InternalNodes::Leaf(vec![
+    //     LeafInternalNode {
+    //         key: b"key30".to_vec(),
+    //         value: b"value30".to_vec(),
+    //     },
+    //     LeafInternalNode {
+    //         key: b"key32".to_vec(),
+    //         value: b"value32".to_vec(),
+    //     },
+    // ]);
+    // node_manager.write_node(3, &node)?;
 
     Ok(())
 }
 
-fn create_test_database() -> Result<Arc<DatabaseState>> {
-    let node_manager = NodeManager::new("./my.db", 10, 128);
-    Ok(Arc::new(DatabaseState {
-        node_manager,
-        root_node_id: NodeId::Address(0),
-    }))
+fn create_test_database() -> Result<Database> {
+    // let node_manager = NodeManager::new("./my.db", 10, 128);
+    // Ok(Arc::new(DatabaseInternal {
+    //     node_manager,
+    //     root_node_id: NodeId::Address(0),
+    // }))
+    Database::open("./my.db", Options {
+        max_files: 10,
+        page_size: 128,
+        cache_size: 1 << 10,
+    })
 }
 
 fn run_basic_cursor_test() -> Result<()> {
@@ -175,39 +186,62 @@ fn run_get_put_test() -> Result<()> {
     tx.remove(b"key32")?;
     tx.remove(b"key40")?;
 
+    println!("\n==============================\n");
     tx.traverse();
     tx.merge()?;
-    println!("\n======\n");
+    println!("\n====== Merge\n");
     tx.traverse();
     tx.split()?;
-    println!("\n======\n");
+    println!("\n====== Split\n");
     tx.traverse();
 
-    println!("\n======\n");
-    let mut cursor = tx.cursor()?;
-    //let mut cursor = Cursor::new(0, Arc::new(node_manager))?;
-    while cursor.is_valid() {
-        println!(
-            "{:?} = {:?}",
-            String::from_utf8_lossy(cursor.key()),
-            String::from_utf8_lossy(cursor.value()),
-        );
-        cursor.next()?;
+    for i in 0..30 {
+        let key = format!("key0000_{i}", i = i*10);
+        let value = format!("value_{i}");
+        tx.put(key.as_bytes(), value.as_bytes())?;
     }
+
+    println!("\n==============================\n");
+    tx.traverse();
+    tx.merge()?;
+    println!("\n====== Merge\n");
+    tx.traverse();
+    tx.split()?;
+    println!("\n====== Split\n");
+    tx.traverse();
 
     Ok(())
 }
 
+// fn random_test() -> Result<()> {
+//     println!("\nrun_get_put_test\n");
+//     let db = create_test_database()?;
+//     let mut tx = db.begin_write();
+
+//     tx.put(b"system:path", b"/usr/local/bin")?;
+//     tx.put(b"system:user:1000", b"sergii")?;
+
+//     println!("\n==============================\n");
+//     tx.traverse();
+//     tx.merge()?;
+//     println!("\n======\n");
+//     tx.traverse();
+//     tx.split()?;
+//     println!("\n======\n");
+//     tx.traverse();
+
+//     Ok(())
+// }
+
 fn main() {
     setup_test_for_cursor().expect("setup test for cursor");
-    run_basic_cursor_test().expect("basic cursor test");
-    run_basic_cursor_reverse_test().expect("basic cursor reverse test");
-    run_cursor_seek().expect("cursor seek");
+    // run_basic_cursor_test().expect("basic cursor test");
+    // run_basic_cursor_reverse_test().expect("basic cursor reverse test");
+    // run_cursor_seek().expect("cursor seek");
     run_get_put_test().expect("get put");
-    // let node_manager = NodeManager::new("./my.db", 10, 128, 1024);
+    // random_test().expect("random test");
 
-    let mut m = BTreeMap::new();
-    m.insert(10, "test");
+    // let node_manager = NodeManager::new("./my.db", 10, 128, 1024);
 
     // let node = InternalNodes::Leaf(vec![
     //     LeafInternalNode {
