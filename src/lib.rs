@@ -1,6 +1,6 @@
 pub mod cursor;
-pub mod node;
 pub mod free_list;
+pub mod node;
 
 mod format;
 mod tx;
@@ -8,8 +8,12 @@ mod tx;
 use anyhow::{anyhow, Result};
 use free_list::FreeList;
 use node::{Address, InternalNodes, MetaNode, NodeId, NodeManager};
+use std::{
+    io::{Seek, Write},
+    path::Path,
+    sync::{Arc, Condvar, Mutex},
+};
 use tx::WriteTransaction;
-use std::{io::{Seek, Write}, path::Path, sync::{Arc, Condvar, Mutex}};
 
 pub type Key = Vec<u8>;
 pub type Value = Vec<u8>;
@@ -27,7 +31,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             max_files: 16,
-            page_size: 4 << 10, // 4KiB
+            page_size: 4 << 10,  // 4KiB
             cache_size: 1 << 20, // 1MiB
         }
     }
@@ -71,7 +75,10 @@ impl Database {
         self.internal.begin_write()
     }
 
-    fn write_initial_state(file_path: impl AsRef<Path>, options: &Options) -> Result<DatabaseInternal> {
+    fn write_initial_state(
+        file_path: impl AsRef<Path>,
+        options: &Options,
+    ) -> Result<DatabaseInternal> {
         // if (options.page_size as usize) < MIN_PAGE_SIZE {
         //     return Err(anyhow!("page size is too small: {}. must be at least {}",
         //         options.page_size, MIN_PAGE_SIZE,
@@ -103,29 +110,42 @@ impl Database {
             },
         ];
         for (i, meta_node) in meta_nodes.iter().enumerate() {
-            file.seek(std::io::SeekFrom::Start(i as u64 * MetaNode::page_size() as u64))?;
+            file.seek(std::io::SeekFrom::Start(
+                i as u64 * MetaNode::page_size() as u64,
+            ))?;
             // let mut page_writer = LimitedWriter::new(&mut file, i * MetaNode::page_size() as u64, MetaNode::page_size() as usize)?;
             meta_node.write(&mut file)?;
         }
 
-        let initial_alignment = options.page_size as u64 * ((MetaNode::page_size()*2 + options.page_size as u64 - 1) / (options.page_size as u64));
+        let initial_alignment = options.page_size as u64
+            * ((MetaNode::page_size() * 2 + options.page_size as u64 - 1)
+                / (options.page_size as u64));
 
         // write free list node
         let freelist = FreeList::default();
-        file.seek(std::io::SeekFrom::Start(initial_alignment + freelist_address))?;
+        file.seek(std::io::SeekFrom::Start(
+            initial_alignment + freelist_address,
+        ))?;
         // let mut page_writer = LimitedWriter::new(&mut file, (initial_page_alignment + free_list_page_id) * options.page_size as u64 , options.page_size as usize)?;
         freelist.write(&mut file)?;
 
         // write root node
         let node = InternalNodes::Leaf(Vec::new());
-        file.seek(std::io::SeekFrom::Start(initial_alignment + root_node_address*options.page_size as u64))?;
+        file.seek(std::io::SeekFrom::Start(
+            initial_alignment + root_node_address * options.page_size as u64,
+        ))?;
         // let mut page_writer = LimitedWriter::new(&mut file, (initial_page_alignment + root_node_page_id) * options.page_size as u64, options.page_size as usize)?;
         node.write(&mut file, options.page_size as usize)?;
 
         file.flush()?;
 
         Ok(DatabaseInternal {
-            node_manager: NodeManager::new(file_path, options.max_files as usize, options.page_size, initial_alignment),
+            node_manager: NodeManager::new(
+                file_path,
+                options.max_files as usize,
+                options.page_size,
+                initial_alignment,
+            ),
             root_node_address,
             writer_token: Mutex::new(Some(WriterToken)),
             writer_token_cond_var: Condvar::new(),
@@ -142,7 +162,6 @@ impl Database {
             .write(true)
             .create(false)
             .open(file_path.as_ref())?;
-
 
         // let meta_nodes = [MetaNode; 2];
         // read first meta page to determine page size
@@ -164,23 +183,34 @@ impl Database {
             }
             (Ok(meta_node0), _) => Ok(meta_node0),
             (_, Ok(meta_node1)) => Ok(meta_node1),
-            (e@Err(_), _) => e,
+            (e @ Err(_), _) => e,
         }?;
 
         if options.page_size != meta_node.page_size {
-            return Err(anyhow!("unexpected page size: {}. actual database page size is {}",
-                options.page_size, meta_node.page_size,
+            return Err(anyhow!(
+                "unexpected page size: {}. actual database page size is {}",
+                options.page_size,
+                meta_node.page_size,
             ));
         }
 
-        let initial_alignment = meta_node.page_size as u64 * ((MetaNode::page_size()*2 + meta_node.page_size as u64 - 1) / (meta_node.page_size as u64));
+        let initial_alignment = meta_node.page_size as u64
+            * ((MetaNode::page_size() * 2 + meta_node.page_size as u64 - 1)
+                / (meta_node.page_size as u64));
 
         // read free list
-        file.seek(std::io::SeekFrom::Start(initial_alignment + meta_node.freelist_node*meta_node.page_size as u64))?;
+        file.seek(std::io::SeekFrom::Start(
+            initial_alignment + meta_node.freelist_node * meta_node.page_size as u64,
+        ))?;
         let freelist = FreeList::read(&mut file)?;
 
         Ok(DatabaseInternal {
-            node_manager: NodeManager::new(file_path, options.max_files as usize, meta_node.page_size, initial_alignment),
+            node_manager: NodeManager::new(
+                file_path,
+                options.max_files as usize,
+                meta_node.page_size,
+                initial_alignment,
+            ),
             root_node_address: meta_node.root_node,
             writer_token: Mutex::new(Some(WriterToken)),
             writer_token_cond_var: Condvar::new(),
@@ -226,16 +256,15 @@ impl DatabaseInternal {
     }
 
     pub fn take_writer_token(&self) -> WriterToken {
-        let mut writer_token_lock = self
-            .writer_token
-            .lock()
-            .expect("writer token lock");
+        let mut writer_token_lock = self.writer_token.lock().expect("writer token lock");
 
         loop {
             if let Some(writer_token) = writer_token_lock.take() {
                 return writer_token;
             } else {
-                writer_token_lock = self.writer_token_cond_var.wait(writer_token_lock)
+                writer_token_lock = self
+                    .writer_token_cond_var
+                    .wait(writer_token_lock)
                     .expect("writer token cond var");
             }
         }
@@ -243,9 +272,11 @@ impl DatabaseInternal {
 
     pub fn release_writer_token(&self, writer_token: WriterToken) {
         let mut writer_token_lock = self.writer_token.lock().expect("files lock");
-        assert!(writer_token_lock.is_none(), "there must be only one writer token");
+        assert!(
+            writer_token_lock.is_none(),
+            "there must be only one writer token"
+        );
         *writer_token_lock = Some(writer_token);
         self.writer_token_cond_var.notify_one();
     }
-
 }

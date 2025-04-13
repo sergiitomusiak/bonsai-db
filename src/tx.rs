@@ -1,10 +1,13 @@
+use crate::cursor::Cursor;
+use crate::node::{
+    BranchInternalNode, InternalNodes, LeafInternalNode, Node, NodeId, NodeReader,
+    MIN_KEYS_PER_PAGE,
+};
+use crate::{DatabaseInternal, WriterToken};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::ops::Not;
 use std::sync::Arc;
-use crate::cursor::Cursor;
-use crate::node::{InternalNodes, BranchInternalNode, LeafInternalNode, Node, NodeId, NodeReader, MIN_KEYS_PER_PAGE};
-use crate::{DatabaseInternal, WriterToken};
 
 pub type TransactionId = u64;
 
@@ -24,18 +27,22 @@ impl NodeReader for WriteTransaction {
         let node = match node_id {
             NodeId::Address(address) => {
                 Node::ReadOnly(self.database.node_manager.read_node(address)?)
-            },
+            }
             NodeId::Id(node_id) => {
                 let node = self.nodes.get(&node_id).expect("tx nodes");
                 Node::Dirty(node)
-            },
+            }
         };
         Ok(node)
     }
 }
 
 impl WriteTransaction {
-    pub fn new(database: Arc<DatabaseInternal>, root_node_address: u64, writer_token: WriterToken) -> Self {
+    pub fn new(
+        database: Arc<DatabaseInternal>,
+        root_node_address: u64,
+        writer_token: WriterToken,
+    ) -> Self {
         Self {
             database,
             next_node_id: 1,
@@ -69,15 +76,45 @@ impl WriteTransaction {
     }
 
     pub fn commit(mut self) -> Result<()> {
-        if let NodeId::Id(node_id) = self.root_node_id {
-            self.traverse_merge(node_id, 0)?;
-            self.traverse_split(node_id, 0)?;
+        if let Err(e) = self.commit_internal() {
+            self.rollback()?;
+            return Err(e);
         }
+        Ok(())
+    }
+
+    pub fn rollback(&mut self) -> Result<()> {
+        todo!()
+    }
+
+    fn commit_internal(&mut self) -> Result<()> {
+        let NodeId::Id(node_id) = self.root_node_id else {
+            return Ok(());
+        };
+
+        self.traverse_merge(node_id, 0)?;
+        self.traverse_split(node_id, 0)?;
+        self.write_freelist()?;
+        self.traverse_write(node_id, 0)?;
+        self.write_meta_node()?;
         // TODO: Allocate and write dirty nodes
-        // TODO: Update meta pages
         // TODO: Clean-up unused pages
         // TODO: Update database state
+        // TODO: Update meta page
+        // TODO: Release write token (impl Drop)
         Ok(())
+    }
+
+    fn write_freelist(&mut self) -> Result<()> {
+        todo!()
+    }
+
+    fn traverse_write(&mut self, _node_id: u64, _node_index: usize) -> Result<()> {
+        todo!()
+    }
+
+    fn write_meta_node(&mut self) -> Result<()> {
+        todo!()
     }
 
     pub fn traverse(&mut self) {
@@ -95,7 +132,8 @@ impl WriteTransaction {
                 println!("Branch = {node_id}");
                 let mut children_ids = Vec::new();
                 for n in nodes {
-                    println!("\t{key:?} ->\t{child_node_id:?}",
+                    println!(
+                        "\t{key:?} ->\t{child_node_id:?}",
                         key = String::from_utf8_lossy(&n.key),
                         child_node_id = n.node_id,
                     );
@@ -113,7 +151,8 @@ impl WriteTransaction {
             InternalNodes::Leaf(nodes) => {
                 println!("Leaf = {node_id}");
                 for n in nodes {
-                    println!("\t{key:?} ->\t{value:?}",
+                    println!(
+                        "\t{key:?} ->\t{value:?}",
                         key = String::from_utf8_lossy(&n.key),
                         value = String::from_utf8_lossy(&n.value),
                     );
@@ -136,7 +175,7 @@ impl WriteTransaction {
         Ok(())
     }
 
-    pub fn traverse_merge(&mut self, node_id: u64, node_index: usize, ) -> Result<bool> {
+    pub fn traverse_merge(&mut self, node_id: u64, node_index: usize) -> Result<bool> {
         let mut child_ref = {
             let node = self.nodes.get(&node_id).expect("node");
             node.next_dirty_child(0)
@@ -186,7 +225,11 @@ impl WriteTransaction {
         while let Some(node_ref) = stack.pop() {
             match &node_ref.node {
                 Node::ReadOnly(node) => {
-                    new_dirty_nodes.push((node_ref.index, node_ref.node_id.node_address(), node.as_ref().clone()));
+                    new_dirty_nodes.push((
+                        node_ref.index,
+                        node_ref.node_id.node_address(),
+                        node.as_ref().clone(),
+                    ));
                 }
                 Node::Dirty(_) => {
                     existing_dirty_nodes.push((node_ref.index, node_ref.node_id.id()));
@@ -208,7 +251,9 @@ impl WriteTransaction {
         }
 
         self.pending_free_pages.extend(
-            new_dirty_nodes.iter().map(|(_, node_address, _)| *node_address),
+            new_dirty_nodes
+                .iter()
+                .map(|(_, node_address, _)| *node_address),
         );
         new_dirty_nodes.reverse();
         existing_dirty_nodes.reverse();
@@ -219,8 +264,7 @@ impl WriteTransaction {
             let (index, node_id) = existing_dirty_nodes
                 .pop()
                 .ok_or_else(|| anyhow!("database is corrupted"))?;
-            let node = self.nodes.get_mut(&node_id)
-                .expect("node must exist");
+            let node = self.nodes.get_mut(&node_id).expect("node must exist");
             let InternalNodes::Leaf(ref mut nodes) = node else {
                 panic!("expected leaf node");
             };
@@ -230,8 +274,7 @@ impl WriteTransaction {
                 .pop()
                 .ok_or_else(|| anyhow!("database is corrupted"))?;
             let node_id = self.insert_new(node);
-            let node = self.nodes.get_mut(&node_id)
-                .expect("node must exist");
+            let node = self.nodes.get_mut(&node_id).expect("node must exist");
             let InternalNodes::Leaf(ref mut nodes) = node else {
                 panic!("expected leaf node");
             };
@@ -244,7 +287,13 @@ impl WriteTransaction {
                     nodes[index].value = value.to_vec();
                     false
                 } else {
-                    nodes.insert(index, LeafInternalNode { key: key.to_vec(), value: value.to_vec() });
+                    nodes.insert(
+                        index,
+                        LeafInternalNode {
+                            key: key.to_vec(),
+                            value: value.to_vec(),
+                        },
+                    );
                     index == 0
                 }
             }
@@ -276,8 +325,7 @@ impl WriteTransaction {
 
         if has_new_dirty_nodes {
             if let Some((index, node_id)) = existing_dirty_nodes.last() {
-                let node = self.nodes.get_mut(&node_id)
-                    .expect("node must exist");
+                let node = self.nodes.get_mut(&node_id).expect("node must exist");
 
                 let InternalNodes::Branch(ref mut nodes) = node else {
                     panic!("expected branch node");
@@ -290,8 +338,7 @@ impl WriteTransaction {
         // Update existing dirty branch nodes with potentially updated key item
         while let Some((index, node_id)) = existing_dirty_nodes.pop() {
             if update_branch_key {
-                let node = self.nodes.get_mut(&node_id)
-                    .expect("node must exist");
+                let node = self.nodes.get_mut(&node_id).expect("node must exist");
 
                 let InternalNodes::Branch(ref mut nodes) = node else {
                     panic!("expected branch node");
@@ -309,10 +356,7 @@ impl WriteTransaction {
     }
 
     fn merge_node(&mut self, node_id: u64, node_index: usize) -> Result<()> {
-        let is_root = self
-            .parent
-            .contains_key(&node_id)
-            .not();
+        let is_root = self.parent.contains_key(&node_id).not();
 
         // If root node is a branch and only has one node then collapse it.
         if is_root {
@@ -351,9 +395,10 @@ impl WriteTransaction {
                 let removed = self.nodes.remove(&node_id).is_some();
                 assert!(removed, "empty node must be removed");
                 self.nodes
-                    .get_mut(&parent_id).expect("parent")
+                    .get_mut(&parent_id)
+                    .expect("parent")
                     .remove_child_at(node_index);
-                return Ok(())
+                return Ok(());
             }
         }
 
@@ -371,34 +416,32 @@ impl WriteTransaction {
 
         if node_index == 0 {
             // merge with next sibling
-            let next_sibling = self
-                .nodes
-                .remove(&sibling_node_id)
-                .expect("next sibling");
+            let next_sibling = self.nodes.remove(&sibling_node_id).expect("next sibling");
 
             self.nodes
-                .get_mut(&node_id).expect("node")
+                .get_mut(&node_id)
+                .expect("node")
                 .merge(next_sibling);
 
             self.nodes
-                .get_mut(&parent_id).expect("node")
+                .get_mut(&parent_id)
+                .expect("node")
                 .remove_child_at(node_index + 1);
 
             let removed = self.parent.remove(&sibling_node_id).is_some();
             assert!(removed, "parent node must be removed");
         } else {
             // merge with previous sibling
-            let node = self
-                .nodes
-                .remove(&node_id)
-                .expect("current node");
+            let node = self.nodes.remove(&node_id).expect("current node");
 
             self.nodes
-                .get_mut(&sibling_node_id).expect("node")
+                .get_mut(&sibling_node_id)
+                .expect("node")
                 .merge(node);
 
             self.nodes
-                .get_mut(&parent_id).expect("node")
+                .get_mut(&parent_id)
+                .expect("node")
                 .remove_child_at(node_index);
 
             let removed = self.parent.remove(&node_id).is_some();
@@ -427,7 +470,7 @@ impl WriteTransaction {
         let page_size = self.database.node_manager.page_size();
         let node_size = node.size();
         let node_len = node.len();
-        if node_size > page_size && node_len >= (MIN_KEYS_PER_PAGE*2) {
+        if node_size > page_size && node_len >= (MIN_KEYS_PER_PAGE * 2) {
             let split_nodes_count = self.split_node(node_id, node_index)?;
             Ok(split_nodes_count)
         } else {
@@ -486,12 +529,13 @@ impl WriteTransaction {
                     .database
                     .node_manager
                     .read_node(page_address)?
-                    .as_ref().clone();
+                    .as_ref()
+                    .clone();
 
                 let child_node_id = self.insert_new(node);
                 self.insert_parent(child_node_id, node_id);
                 Ok(child_node_id)
-            },
+            }
         }
     }
 
@@ -511,7 +555,11 @@ impl WriteTransaction {
 
 impl Drop for WriteTransaction {
     fn drop(&mut self) {
-        self.database.release_writer_token(self.writer_token.take().expect("writer tx must own writer token"));
+        self.database.release_writer_token(
+            self.writer_token
+                .take()
+                .expect("writer tx must own writer token"),
+        );
     }
 }
 

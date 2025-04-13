@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Result};
-use std::hash::Hasher;
-use std::mem::size_of;
 use std::fs::{File, OpenOptions};
+use std::hash::Hasher;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::mem::size_of;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
@@ -83,10 +83,7 @@ impl LeafInternalNode {
         let mut value = Vec::with_capacity(val_len);
         value.resize(val_len, 0);
         reader.read_exact(&mut value)?;
-        Ok(Self {
-            key,
-            value,
-        })
+        Ok(Self { key, value })
     }
 
     fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
@@ -205,35 +202,23 @@ pub enum InternalNodes {
 impl InternalNodes {
     pub fn size(&self) -> u32 {
         let nodes_size: u32 = match self {
-            Self::Branch(nodes) => {
-                nodes.iter().map(|node| node.size() as u32).sum()
-            },
-            Self::Leaf(nodes) => {
-                nodes.iter().map(|node| node.size() as u32).sum()
-            },
+            Self::Branch(nodes) => nodes.iter().map(|node| node.size() as u32).sum(),
+            Self::Leaf(nodes) => nodes.iter().map(|node| node.size() as u32).sum(),
         };
         (NodeHeader::size() as u32) + nodes_size
     }
 
     pub fn len(&self) -> usize {
         match self {
-            Self::Branch(nodes) => {
-                nodes.len()
-            },
-            Self::Leaf(nodes) => {
-                nodes.len()
-            },
+            Self::Branch(nodes) => nodes.len(),
+            Self::Leaf(nodes) => nodes.len(),
         }
     }
 
     pub fn key_at(&self, index: usize) -> &[u8] {
         match self {
-            Self::Branch(nodes) => {
-                nodes[index].key.as_ref()
-            },
-            Self::Leaf(nodes) => {
-                nodes[index].key.as_ref()
-            },
+            Self::Branch(nodes) => nodes[index].key.as_ref(),
+            Self::Leaf(nodes) => nodes[index].key.as_ref(),
         }
     }
 
@@ -243,12 +228,8 @@ impl InternalNodes {
 
     pub fn first_child(&self) -> Option<&BranchInternalNode> {
         match self {
-            Self::Branch(nodes) => {
-                nodes.first()
-            },
-            Self::Leaf(_) => {
-                None
-            },
+            Self::Branch(nodes) => nodes.first(),
+            Self::Leaf(_) => None,
         }
     }
 
@@ -256,7 +237,7 @@ impl InternalNodes {
         if let Self::Branch(nodes) = self {
             for (index, node) in nodes[start_index..].iter().enumerate() {
                 if let NodeId::Id(id) = node.node_id {
-                    return Some((id, start_index + index))
+                    return Some((id, start_index + index));
                 }
             }
         }
@@ -279,16 +260,10 @@ impl InternalNodes {
 
     pub fn merge(&mut self, other: InternalNodes) {
         match (self, other) {
-            (
-                Self::Branch(self_nodes),
-                Self::Branch(mut other_nodes),
-            ) => {
+            (Self::Branch(self_nodes), Self::Branch(mut other_nodes)) => {
                 self_nodes.append(&mut other_nodes);
-            },
-            (
-                Self::Leaf(self_nodes),
-                Self::Leaf(mut other_nodes),
-            ) => {
+            }
+            (Self::Leaf(self_nodes), Self::Leaf(mut other_nodes)) => {
                 self_nodes.append(&mut other_nodes);
             }
             _ => panic!("incompatible nodes"),
@@ -303,7 +278,7 @@ impl InternalNodes {
         if nodes.is_empty() && index == 0 {
             *nodes = child_nodes;
         } else {
-            nodes.splice(index..index+1, child_nodes);
+            nodes.splice(index..index + 1, child_nodes);
         }
     }
 
@@ -321,7 +296,7 @@ impl InternalNodes {
         let mut result = Vec::new();
         let mut size = NodeHeader::size();
         let mut new_node = Vec::new();
-        let drain_len = internal_nodes.len()-MIN_KEYS_PER_PAGE;
+        let drain_len = internal_nodes.len() - MIN_KEYS_PER_PAGE;
         for internal_node in internal_nodes.drain(..drain_len) {
             if size + internal_node.size() > threshold && new_node.len() >= MIN_KEYS_PER_PAGE {
                 result.push(Self::Branch(std::mem::take(&mut new_node)));
@@ -343,7 +318,7 @@ impl InternalNodes {
         let mut result = Vec::new();
         let mut size = NodeHeader::size();
         let mut new_node = Vec::new();
-        let drain_len = internal_nodes.len()-MIN_KEYS_PER_PAGE;
+        let drain_len = internal_nodes.len() - MIN_KEYS_PER_PAGE;
         for internal_node in internal_nodes.drain(..drain_len) {
             if size + internal_node.size() > threshold && new_node.len() >= MIN_KEYS_PER_PAGE {
                 result.push(Self::Leaf(std::mem::take(&mut new_node)));
@@ -384,12 +359,12 @@ impl InternalNodes {
                 for node in nodes {
                     node.write(writer)?;
                 }
-            },
+            }
             Self::Leaf(nodes) => {
                 for node in nodes {
                     node.write(writer)?;
                 }
-            },
+            }
         }
         Ok(())
     }
@@ -397,21 +372,15 @@ impl InternalNodes {
     fn write_header<W: Write>(&self, writer: &mut W, page_size: usize) -> Result<()> {
         let (nodes_len, nodes_size, flags) = match self {
             Self::Branch(nodes) => {
-                let nodes_size: usize = nodes
-                    .iter()
-                    .map(|node| node.size())
-                    .sum();
+                let nodes_size: usize = nodes.iter().map(|node| node.size()).sum();
 
                 (nodes.len(), nodes_size, BRANCH_NODE)
-            },
+            }
             Self::Leaf(nodes) => {
-                let nodes_size: usize = nodes
-                    .iter()
-                    .map(|node| node.size())
-                    .sum();
+                let nodes_size: usize = nodes.iter().map(|node| node.size()).sum();
 
                 (nodes.len(), nodes_size, LEAF_NODE)
-            },
+            }
         };
 
         let data_size = nodes_size + NodeHeader::size();
@@ -428,12 +397,13 @@ impl InternalNodes {
             flags,
             internal_nodes_len: nodes_len as u16,
             overflow_len: overflow_len as u16,
-        }.write(writer)
+        }
+        .write(writer)
     }
 
     pub fn has_min_keys(&self) -> bool {
         match self {
-            Self::Branch(nodes) =>  nodes.len() > 2,
+            Self::Branch(nodes) => nodes.len() > 2,
             Self::Leaf(nodes) => nodes.len() > 1,
         }
     }
@@ -513,7 +483,7 @@ impl<'a> Deref for Node<'a> {
     fn deref(&self) -> &Self::Target {
         match &self {
             Self::Dirty(node) => node,
-            Self::ReadOnly(node) => node.as_ref()
+            Self::ReadOnly(node) => node.as_ref(),
         }
     }
 }
@@ -522,7 +492,7 @@ impl<'a> AsRef<InternalNodes> for Node<'a> {
     fn as_ref(&self) -> &InternalNodes {
         match &self {
             Self::Dirty(node) => node,
-            Self::ReadOnly(node) => node.as_ref()
+            Self::ReadOnly(node) => node.as_ref(),
         }
     }
 }
@@ -542,7 +512,12 @@ pub struct NodeManager {
 }
 
 impl NodeManager {
-    pub fn new(file_path: impl AsRef<Path>, max_files: usize, page_size: u32, initial_alignment: u64) -> Self {
+    pub fn new(
+        file_path: impl AsRef<Path>,
+        max_files: usize,
+        page_size: u32,
+        initial_alignment: u64,
+    ) -> Self {
         Self {
             file_path: file_path.as_ref().to_path_buf(),
             max_files,
@@ -559,7 +534,9 @@ impl NodeManager {
 
     pub fn write_node(&self, page_id: Address, node: &InternalNodes) -> Result<()> {
         let mut file = self.get_file()?;
-        file.seek(SeekFrom::Start(self.initial_alignment + page_id as u64 * self.page_size as u64))?;
+        file.seek(SeekFrom::Start(
+            self.initial_alignment + page_id as u64 * self.page_size as u64,
+        ))?;
         let node = node.write(&mut file, self.page_size as usize)?;
         self.release_file(file);
         Ok(node)
@@ -567,7 +544,9 @@ impl NodeManager {
 
     pub fn read_node(&self, page_id: Address) -> Result<Arc<InternalNodes>> {
         let mut file = self.get_file()?;
-        file.seek(SeekFrom::Start(self.initial_alignment  + page_id as u64 * self.page_size as u64))?;
+        file.seek(SeekFrom::Start(
+            self.initial_alignment + page_id as u64 * self.page_size as u64,
+        ))?;
         let node = InternalNodes::read(&mut file)?;
         self.release_file(file);
         Ok(Arc::new(node))
@@ -586,11 +565,16 @@ impl NodeManager {
 
             if files.files_len < self.max_files {
                 files.files_len += 1;
-                let file = OpenOptions::new().read(true).write(true).open(self.file_path.clone())?;
+                let file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(self.file_path.clone())?;
                 return Ok(file);
             }
 
-            files = self.files_condvar.wait(files)
+            files = self
+                .files_condvar
+                .wait(files)
                 .map_err(|e| anyhow!("{e:?}"))?;
         }
     }
@@ -670,22 +654,14 @@ mod tests {
     fn reads_branch_node() {
         let data = &[
             // flags
-            0x00, 0x01,
-            // internal nodes len
-            0x00, 0x02,
-            // overflow len
-            0x00, 0x00,
-            // page id
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
-            // key len
-            0x00, 0x0A,
-            // key
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A,
-            // page id
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21,
-            // key len
-            0x00, 0x09,
-            // key
+            0x00, 0x01, // internal nodes len
+            0x00, 0x02, // overflow len
+            0x00, 0x00, // page id
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, // key len
+            0x00, 0x0A, // key
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, // page id
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, // key len
+            0x00, 0x09, // key
             0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19,
         ];
 
@@ -696,49 +672,40 @@ mod tests {
             panic!("unexpected node type");
         };
 
-        assert_eq!(nodes, vec![
-            BranchInternalNode {
-                // node_id: NodeId::Address(16),
-                key: (1..=10).into_iter().collect::<Vec<u8>>(),
-                node_id: NodeId::Address(16),
-            },
-            BranchInternalNode {
-                // node_id: NodeId::Address(33),
-                key: (17..=25).into_iter().collect::<Vec<u8>>(),
-                node_id: NodeId::Address(33),
-            }
-        ]);
+        assert_eq!(
+            nodes,
+            vec![
+                BranchInternalNode {
+                    // node_id: NodeId::Address(16),
+                    key: (1..=10).into_iter().collect::<Vec<u8>>(),
+                    node_id: NodeId::Address(16),
+                },
+                BranchInternalNode {
+                    // node_id: NodeId::Address(33),
+                    key: (17..=25).into_iter().collect::<Vec<u8>>(),
+                    node_id: NodeId::Address(33),
+                }
+            ]
+        );
     }
 
     #[test]
     fn reads_leaf_node() {
         let data = &[
             // flags
-            0x00, 0x02,
-            // internal nodes len
-            0x00, 0x02,
-            // overflow len
-            0x00, 0x00,
-
-            // node 1
+            0x00, 0x02, // internal nodes len
+            0x00, 0x02, // overflow len
+            0x00, 0x00, // node 1
             // key len
-            0x00, 0x0A,
-            // key
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A,
-            // value len
-            0x00, 0x00, 0x00, 0x10,
-            // value
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
-
-            // node 2
+            0x00, 0x0A, // key
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, // value len
+            0x00, 0x00, 0x00, 0x10, // value
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+            0x0F, 0x10, // node 2
             // key len
-            0x00, 0x09,
-            // key
-            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19,
-            // value len
-            0x00, 0x00, 0x00, 0x02,
-            // value
+            0x00, 0x09, // key
+            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, // value len
+            0x00, 0x00, 0x00, 0x02, // value
             0x11, 0x12,
         ];
 
@@ -749,15 +716,18 @@ mod tests {
             panic!("unexpected node type");
         };
 
-        assert_eq!(nodes, vec![
-            LeafInternalNode {
-                key: (1..=10).into_iter().collect::<Vec<u8>>(),
-                value: (1..=16).into_iter().collect::<Vec<u8>>()
-            },
-            LeafInternalNode {
-                key: (17..=25).into_iter().collect::<Vec<u8>>(),
-                value: vec![17, 18],
-            },
-        ]);
+        assert_eq!(
+            nodes,
+            vec![
+                LeafInternalNode {
+                    key: (1..=10).into_iter().collect::<Vec<u8>>(),
+                    value: (1..=16).into_iter().collect::<Vec<u8>>()
+                },
+                LeafInternalNode {
+                    key: (17..=25).into_iter().collect::<Vec<u8>>(),
+                    value: vec![17, 18],
+                },
+            ]
+        );
     }
 }

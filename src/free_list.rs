@@ -1,5 +1,5 @@
 use crate::{
-    format::{read_u64, read_vec_u64, write_u64, write_slice_u64},
+    format::{read_u64, read_vec_u64, write_slice_u64, write_u64},
     node::Address,
     tx::TransactionId,
 };
@@ -18,7 +18,7 @@ pub struct FreeList {
 
 impl FreeList {
     pub fn allocate(&mut self, required_pages: usize) -> Option<Address> {
-        let required_pages= required_pages as u64;
+        let required_pages = required_pages as u64;
         let mut previous_page_id: Option<Address> = None;
         let mut initial_page_id = *self.free.first()?;
 
@@ -26,17 +26,17 @@ impl FreeList {
             assert!(*page_id > 1, "invalid page allocation: {page_id}");
 
             let restart_initial_page = previous_page_id
-                .map(|previous_page_id| page_id-previous_page_id != 1)
+                .map(|previous_page_id| page_id - previous_page_id != 1)
                 .unwrap_or(false);
 
             if restart_initial_page {
                 initial_page_id = *page_id;
             }
 
-            if page_id-initial_page_id+1 == required_pages as Address {
+            if page_id - initial_page_id + 1 == required_pages as Address {
                 // Remove found pages from free list
                 for i in 0..required_pages {
-                    self.free.remove(&(initial_page_id+i));
+                    self.free.remove(&(initial_page_id + i));
                 }
                 return Some(initial_page_id);
             }
@@ -76,15 +76,14 @@ impl FreeList {
     }
 
     pub fn release(&mut self, transaction_id: TransactionId) {
-        let txs = self.pending
+        let txs = self
+            .pending
             .range(..=transaction_id)
-            .map(|(tx_id, _)| *tx_id).collect::<Vec<_>>();
+            .map(|(tx_id, _)| *tx_id)
+            .collect::<Vec<_>>();
 
         for tx_id in txs {
-            let pages = self
-                .pending
-                .remove(&tx_id)
-                .expect("pending transactions");
+            let pages = self.pending.remove(&tx_id).expect("pending transactions");
 
             self.free.extend(pages);
         }
@@ -113,8 +112,9 @@ impl FreeList {
     }
 
     pub fn rollback(&mut self, transaction_id: TransactionId) {
-        let Some(pages) = self.pending.remove(&transaction_id)
-            else { return; };
+        let Some(pages) = self.pending.remove(&transaction_id) else {
+            return;
+        };
 
         for page in pages {
             self.cache.remove(&page);
@@ -140,12 +140,9 @@ mod tests {
 
     const FREE_LIST_DATA: &[u8] = &[
         // len
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
-        // 16
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
-        // 32
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20,
-        // 48
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, // 16
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, // 32
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, // 48
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30,
     ];
 

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use bonsai_db::{
-    node::{BranchInternalNode, InternalNodes, LeafInternalNode, NodeId, NodeManager}, Database, DatabaseInternal, Options
+    node::{BranchInternalNode, InternalNodes, LeafInternalNode, NodeId, NodeManager},
+    Database, DatabaseInternal, Options,
 };
 use std::sync::Arc;
 
@@ -8,11 +9,14 @@ fn setup_test_for_cursor() -> Result<()> {
     let path = "./my.db";
     let res = std::fs::remove_file(path);
     println!("Remove file: {res:?}");
-    let _db = Database::open(path, Options {
-        max_files: 10,
-        page_size: 128,
-        cache_size: 1 << 10,
-    })?;
+    let _db = Database::open(
+        path,
+        Options {
+            max_files: 10,
+            page_size: 128,
+            cache_size: 1 << 10,
+        },
+    )?;
     // std::fs::File::create(&path)?;
     // let node_manager = NodeManager::new("./my.db", 10, 128);
 
@@ -81,11 +85,14 @@ fn create_test_database() -> Result<Database> {
     //     node_manager,
     //     root_node_id: NodeId::Address(0),
     // }))
-    Database::open("./my.db", Options {
-        max_files: 10,
-        page_size: 128,
-        cache_size: 1 << 10,
-    })
+    Database::open(
+        "./my.db",
+        Options {
+            max_files: 10,
+            page_size: 128,
+            cache_size: 1 << 10,
+        },
+    )
 }
 
 fn run_basic_cursor_test() -> Result<()> {
@@ -130,10 +137,8 @@ fn run_basic_cursor_reverse_test() -> Result<()> {
 fn run_cursor_seek() -> Result<()> {
     println!("\nrun_cursor_seek\n");
     let seeks = [
-        "key0", "key10", "key11", "key12", "key13",
-        "key2", "key20", "key21", "key22", "key23",
-        "key3", "key30", "key31", "key32", "key33",
-        "key4",
+        "key0", "key10", "key11", "key12", "key13", "key2", "key20", "key21", "key22", "key23",
+        "key3", "key30", "key31", "key32", "key33", "key4",
     ];
 
     for seek in seeks {
@@ -196,7 +201,7 @@ fn run_get_put_test() -> Result<()> {
     tx.traverse();
 
     for i in 0..30 {
-        let key = format!("key0000_{i}", i = i*10);
+        let key = format!("key0000_{i}", i = i * 10);
         let value = format!("value_{i}");
         tx.put(key.as_bytes(), value.as_bytes())?;
     }
