@@ -14,6 +14,7 @@ use crate::{
 
 const BRANCH_NODE: u16 = 1;
 const LEAF_NODE: u16 = 2;
+pub const FREELIST_NODE: u16 = 3;
 
 pub const MIN_KEYS_PER_PAGE: usize = 2;
 
@@ -97,17 +98,18 @@ impl LeafInternalNode {
     }
 }
 
+#[derive(Debug)]
 pub struct NodeHeader {
     pub flags: u16,
-    pub internal_nodes_len: u16,
-    pub overflow_len: u16,
+    pub internal_nodes_len: u64,
+    pub overflow_len: u64,
 }
 
 impl NodeHeader {
-    fn read<R: Read>(reader: &mut R) -> Result<Self> {
+    pub fn read<R: Read>(reader: &mut R) -> Result<Self> {
         let flags = read_u16(reader)?;
-        let internal_nodes_len = read_u16(reader)?;
-        let overflow_len = read_u16(reader)?;
+        let internal_nodes_len = read_u64(reader)?;
+        let overflow_len = read_u64(reader)?;
         Ok(Self {
             flags,
             internal_nodes_len,
@@ -115,15 +117,20 @@ impl NodeHeader {
         })
     }
 
-    fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
+    pub fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
         write_u16(writer, self.flags)?;
-        write_u16(writer, self.internal_nodes_len)?;
-        write_u16(writer, self.overflow_len)?;
+        write_u64(writer, self.internal_nodes_len)?;
+        write_u64(writer, self.overflow_len)?;
         Ok(())
     }
 
-    fn size() -> usize {
-        6
+    pub fn size() -> usize {
+        // flags
+        std::mem::size_of::<u16>() +
+        // internal_nodes_len
+        std::mem::size_of::<u32>() +
+        // overflow_len
+        std::mem::size_of::<u32>()
     }
 }
 
@@ -390,13 +397,10 @@ impl InternalNodes {
             (data_size - page_size) / page_size
         };
 
-        assert!(nodes_len <= u16::MAX as usize);
-        assert!(overflow_len <= u16::MAX as usize);
-
         NodeHeader {
             flags,
-            internal_nodes_len: nodes_len as u16,
-            overflow_len: overflow_len as u16,
+            internal_nodes_len: nodes_len as u64,
+            overflow_len: overflow_len as u64,
         }
         .write(writer)
     }

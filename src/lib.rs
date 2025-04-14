@@ -7,7 +7,7 @@ mod tx;
 
 use anyhow::{anyhow, Result};
 use free_list::FreeList;
-use node::{Address, InternalNodes, MetaNode, NodeId, NodeManager};
+use node::{Address, InternalNodes, MetaNode, NodeHeader, NodeManager};
 use std::{
     io::{Seek, Write},
     path::Path,
@@ -127,7 +127,7 @@ impl Database {
             initial_alignment + freelist_address,
         ))?;
         // let mut page_writer = LimitedWriter::new(&mut file, (initial_page_alignment + free_list_page_id) * options.page_size as u64 , options.page_size as usize)?;
-        freelist.write(&mut file)?;
+        let freelist_header = freelist.write(&mut file, options.page_size)?;
 
         // write root node
         let node = InternalNodes::Leaf(Vec::new());
@@ -147,10 +147,10 @@ impl Database {
                 initial_alignment,
             ),
             root_node_address,
-            writer_token: Mutex::new(Some(WriterToken)),
-            writer_token_cond_var: Condvar::new(),
+            writer: Mutex::new(Some(Writer { freelist, freelist_node_address: freelist_address, freelist_header })),
+            writer_cond_var: Condvar::new(),
             meta_nodes,
-            freelist,
+            page_size: options.page_size,
         })
     }
 
@@ -202,7 +202,7 @@ impl Database {
         file.seek(std::io::SeekFrom::Start(
             initial_alignment + meta_node.freelist_node * meta_node.page_size as u64,
         ))?;
-        let freelist = FreeList::read(&mut file)?;
+        let (freelist_header, freelist) = FreeList::read(&mut file)?;
 
         Ok(DatabaseInternal {
             node_manager: NodeManager::new(
@@ -212,38 +212,28 @@ impl Database {
                 initial_alignment,
             ),
             root_node_address: meta_node.root_node,
-            writer_token: Mutex::new(Some(WriterToken)),
-            writer_token_cond_var: Condvar::new(),
+            writer: Mutex::new(Some(Writer { freelist_header, freelist, freelist_node_address: meta_node.freelist_node })),
+            writer_cond_var: Condvar::new(),
+            page_size: meta_node.page_size,
             meta_nodes: [meta_node.clone(), meta_node],
-            freelist,
         })
-
-        // Ok(DatabaseState {
-        //     initial_page_alignment,
-        //     meta_node,
-        //     free_list,
-        //     node_manager: NodeManager::new(
-        //         file_path,
-        //         options.max_read_files as usize,
-        //         options.page_size,
-        //         options.cache_size as u32,
-        //     ),
-        //     page_size: options.page_size,
-        // })
     }
 }
 
-#[derive(Debug, Default)]
-pub struct WriterToken;
+#[derive(Debug)]
+pub struct Writer {
+    pub freelist_header: NodeHeader,
+    pub freelist: FreeList,
+    pub freelist_node_address: Address,
+}
 
 pub struct DatabaseInternal {
     pub node_manager: NodeManager,
     pub root_node_address: Address,
-    pub writer_token: Mutex<Option<WriterToken>>,
-    pub writer_token_cond_var: Condvar,
+    pub writer: Mutex<Option<Writer>>,
+    pub writer_cond_var: Condvar,
     pub meta_nodes: [MetaNode; 2],
-    pub freelist: FreeList,
-    // page_size: u32,
+    pub page_size: u32,
     // initial_page_alignment: u64,
     // meta_node: MetaNode,
     // free_list: FreeList,
@@ -251,32 +241,40 @@ pub struct DatabaseInternal {
 
 impl DatabaseInternal {
     pub fn begin_write(self: &Arc<Self>) -> WriteTransaction {
-        let writer_token = self.take_writer_token();
-        WriteTransaction::new(self.clone(), self.root_node_address, writer_token)
+        let writer = self.take_writer();
+        WriteTransaction::new(self.clone(), self.root_node_address, writer)
     }
 
-    pub fn take_writer_token(&self) -> WriterToken {
-        let mut writer_token_lock = self.writer_token.lock().expect("writer token lock");
+    pub fn meta(&self) -> MetaNode {
+        if self.meta_nodes[0].transaction_id >= self.meta_nodes[0].transaction_id {
+            self.meta_nodes[0].clone()
+        } else {
+            self.meta_nodes[1].clone()
+        }
+    }
+
+    pub fn take_writer(&self) -> Writer {
+        let mut writer_lock = self.writer.lock().expect("writer lock");
 
         loop {
-            if let Some(writer_token) = writer_token_lock.take() {
-                return writer_token;
+            if let Some(writer) = writer_lock.take() {
+                return writer;
             } else {
-                writer_token_lock = self
-                    .writer_token_cond_var
-                    .wait(writer_token_lock)
-                    .expect("writer token cond var");
+                writer_lock = self
+                    .writer_cond_var
+                    .wait(writer_lock)
+                    .expect("writer cond var");
             }
         }
     }
 
-    pub fn release_writer_token(&self, writer_token: WriterToken) {
-        let mut writer_token_lock = self.writer_token.lock().expect("files lock");
+    pub fn release_writer(&self, writer: Writer) {
+        let mut writer_lock = self.writer.lock().expect("files lock");
         assert!(
-            writer_token_lock.is_none(),
+            writer_lock.is_none(),
             "there must be only one writer token"
         );
-        *writer_token_lock = Some(writer_token);
-        self.writer_token_cond_var.notify_one();
+        *writer_lock = Some(writer);
+        self.writer_cond_var.notify_one();
     }
 }

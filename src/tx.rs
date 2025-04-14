@@ -1,9 +1,8 @@
 use crate::cursor::Cursor;
 use crate::node::{
-    BranchInternalNode, InternalNodes, LeafInternalNode, Node, NodeId, NodeReader,
-    MIN_KEYS_PER_PAGE,
+    Address, BranchInternalNode, InternalNodes, LeafInternalNode, MetaNode, Node, NodeHeader, NodeId, NodeReader, MIN_KEYS_PER_PAGE
 };
-use crate::{DatabaseInternal, WriterToken};
+use crate::{DatabaseInternal, Writer};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::ops::Not;
@@ -12,14 +11,14 @@ use std::sync::Arc;
 pub type TransactionId = u64;
 
 pub struct WriteTransaction {
-    // meta: MetaNode,
+    meta: MetaNode,
     database: Arc<DatabaseInternal>,
     next_node_id: u64,
     nodes: HashMap<u64, InternalNodes>,
     parent: HashMap<u64, u64>,
     root_node_id: NodeId,
     pending_free_pages: Vec<u64>,
-    writer_token: Option<WriterToken>,
+    writer: Option<Writer>,
 }
 
 impl NodeReader for WriteTransaction {
@@ -41,16 +40,17 @@ impl WriteTransaction {
     pub fn new(
         database: Arc<DatabaseInternal>,
         root_node_address: u64,
-        writer_token: WriterToken,
+        writer: Writer,
     ) -> Self {
         Self {
+            meta: database.meta(),
             database,
             next_node_id: 1,
             nodes: HashMap::new(),
             parent: HashMap::new(),
             root_node_id: NodeId::Address(root_node_address),
             pending_free_pages: Vec::new(),
-            writer_token: Some(writer_token),
+            writer: Some(writer),
         }
     }
 
@@ -106,7 +106,22 @@ impl WriteTransaction {
     }
 
     fn write_freelist(&mut self) -> Result<()> {
-        todo!()
+        {
+            let writer = self.writer.as_mut().expect("writer");
+            let size = NodeHeader::size() as u64 + writer.freelist.size() as u64;
+            let page_size = self.database.page_size as u64;
+            let pages = ((size + page_size - 1) / page_size) as u16;
+            assert!(pages > 0);
+            writer.freelist.free(
+                self.meta.transaction_id,
+                writer.freelist_node_address,
+                writer.freelist_header.overflow_len,
+            );
+        }
+        let writer = self.writer.as_ref().expect("writer");
+        let page_address = self.allocate(writer.freelist.size() as u64)?;
+        // writer.freelist.write(self.database.node_manager, writer, page_size)
+        Ok(())
     }
 
     fn traverse_write(&mut self, _node_id: u64, _node_index: usize) -> Result<()> {
@@ -123,6 +138,10 @@ impl WriteTransaction {
             return;
         };
         self.traverse_inner(node_id);
+    }
+
+    fn allocate(&mut self, required_size: u64) -> Result<Address> {
+        todo!()
     }
 
     fn traverse_inner(&self, node_id: u64) {
@@ -555,8 +574,8 @@ impl WriteTransaction {
 
 impl Drop for WriteTransaction {
     fn drop(&mut self) {
-        self.database.release_writer_token(
-            self.writer_token
+        self.database.release_writer(
+            self.writer
                 .take()
                 .expect("writer tx must own writer token"),
         );
