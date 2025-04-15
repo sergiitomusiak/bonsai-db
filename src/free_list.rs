@@ -1,6 +1,6 @@
 use crate::{
     format::{read_u64, read_vec_u64, write_slice_u64, write_u64},
-    node::{Address, NodeHeader, FREELIST_NODE},
+    node::{Address, NodeHeader, NodeManager, FREELIST_NODE},
     tx::TransactionId,
 };
 
@@ -55,6 +55,7 @@ impl FreeList {
             pending: BTreeMap::new(),
             cache: HashSet::new(),
         };
+        println!("FREE LIST: {node:?}");
         Ok((header, node))
     }
 
@@ -113,6 +114,11 @@ impl FreeList {
     pub fn pending_pages_len(&self) -> usize {
         self.pending.iter().map(|(_, pages)| pages.len()).sum()
     }
+
+    // pub fn reload(&mut self, other: FreeList) -> Result<()> {
+    //     // let freelist = node_manager.read_node(page_id)
+    //     todo!()
+    // }
 
     fn copy_all(&self) -> Vec<u64> {
         let pending = self

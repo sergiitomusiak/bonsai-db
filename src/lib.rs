@@ -91,8 +91,12 @@ impl Database {
             .create_new(true)
             .open(file_path.as_ref())?;
 
-        let freelist_address = 0;
-        let root_node_address = 1;
+        let initial_alignment = options.page_size as u64
+            * ((MetaNode::page_size() * 2 + options.page_size as u64 - 1)
+                / (options.page_size as u64));
+
+        let freelist_address = initial_alignment;
+        let root_node_address = initial_alignment + options.page_size as u64;
 
         // write meta nodes
         let meta_nodes = [
@@ -117,26 +121,19 @@ impl Database {
             meta_node.write(&mut file)?;
         }
 
-        let initial_alignment = options.page_size as u64
-            * ((MetaNode::page_size() * 2 + options.page_size as u64 - 1)
-                / (options.page_size as u64));
-
         // write free list node
         let freelist = FreeList::default();
-        file.seek(std::io::SeekFrom::Start(
-            initial_alignment + freelist_address,
-        ))?;
+        file.seek(std::io::SeekFrom::Start(freelist_address))?;
         // let mut page_writer = LimitedWriter::new(&mut file, (initial_page_alignment + free_list_page_id) * options.page_size as u64 , options.page_size as usize)?;
         let freelist_header = freelist.write(&mut file, options.page_size)?;
 
         // write root node
         let node = InternalNodes::Leaf(Vec::new());
-        file.seek(std::io::SeekFrom::Start(
-            initial_alignment + root_node_address * options.page_size as u64,
-        ))?;
+        file.seek(std::io::SeekFrom::Start(root_node_address))?;
         // let mut page_writer = LimitedWriter::new(&mut file, (initial_page_alignment + root_node_page_id) * options.page_size as u64, options.page_size as usize)?;
         node.write(&mut file, options.page_size as usize)?;
 
+        println!("FILE SIZE: {:?}", file.metadata()?.len());
         file.flush()?;
 
         Ok(DatabaseInternal {
@@ -146,10 +143,13 @@ impl Database {
                 options.page_size,
                 initial_alignment,
             ),
-            root_node_address,
-            writer: Mutex::new(Some(Writer { freelist, freelist_node_address: freelist_address, freelist_header })),
+            writer: Mutex::new(Some(Writer {
+                freelist,
+                freelist_node_address: freelist_address,
+                freelist_header,
+                meta_nodes,
+            })),
             writer_cond_var: Condvar::new(),
-            meta_nodes,
             page_size: options.page_size,
         })
     }
@@ -199,9 +199,7 @@ impl Database {
                 / (meta_node.page_size as u64));
 
         // read free list
-        file.seek(std::io::SeekFrom::Start(
-            initial_alignment + meta_node.freelist_node * meta_node.page_size as u64,
-        ))?;
+        file.seek(std::io::SeekFrom::Start(meta_node.freelist_node))?;
         let (freelist_header, freelist) = FreeList::read(&mut file)?;
 
         Ok(DatabaseInternal {
@@ -211,11 +209,14 @@ impl Database {
                 meta_node.page_size,
                 initial_alignment,
             ),
-            root_node_address: meta_node.root_node,
-            writer: Mutex::new(Some(Writer { freelist_header, freelist, freelist_node_address: meta_node.freelist_node })),
-            writer_cond_var: Condvar::new(),
             page_size: meta_node.page_size,
-            meta_nodes: [meta_node.clone(), meta_node],
+            writer: Mutex::new(Some(Writer {
+                freelist_header,
+                freelist,
+                freelist_node_address: meta_node.freelist_node,
+                meta_nodes: [meta_node.clone(), meta_node],
+            })),
+            writer_cond_var: Condvar::new(),
         })
     }
 }
@@ -225,14 +226,31 @@ pub struct Writer {
     pub freelist_header: NodeHeader,
     pub freelist: FreeList,
     pub freelist_node_address: Address,
+    pub meta_nodes: [MetaNode; 2],
+}
+
+impl Writer {
+    pub fn meta_mut(&mut self) -> &mut MetaNode {
+        if self.meta_nodes[0].transaction_id >= self.meta_nodes[0].transaction_id {
+            &mut self.meta_nodes[0]
+        } else {
+            &mut self.meta_nodes[1]
+        }
+    }
+
+    pub fn meta(&self) -> &MetaNode {
+        if self.meta_nodes[0].transaction_id >= self.meta_nodes[0].transaction_id {
+            &self.meta_nodes[0]
+        } else {
+            &self.meta_nodes[1]
+        }
+    }
 }
 
 pub struct DatabaseInternal {
     pub node_manager: NodeManager,
-    pub root_node_address: Address,
     pub writer: Mutex<Option<Writer>>,
     pub writer_cond_var: Condvar,
-    pub meta_nodes: [MetaNode; 2],
     pub page_size: u32,
     // initial_page_alignment: u64,
     // meta_node: MetaNode,
@@ -242,15 +260,7 @@ pub struct DatabaseInternal {
 impl DatabaseInternal {
     pub fn begin_write(self: &Arc<Self>) -> WriteTransaction {
         let writer = self.take_writer();
-        WriteTransaction::new(self.clone(), self.root_node_address, writer)
-    }
-
-    pub fn meta(&self) -> MetaNode {
-        if self.meta_nodes[0].transaction_id >= self.meta_nodes[0].transaction_id {
-            self.meta_nodes[0].clone()
-        } else {
-            self.meta_nodes[1].clone()
-        }
+        WriteTransaction::new(self.clone(), writer)
     }
 
     pub fn take_writer(&self) -> Writer {

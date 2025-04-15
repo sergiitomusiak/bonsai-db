@@ -138,7 +138,10 @@ impl<'a> Cursor<'a> {
             }
 
             let Some(last_index) = last_index else {
-                // self.stack.last_mut().expect("cursor stack top").index += 1;
+                let node_ref = self.stack.last_mut().expect("cursor stack top");
+                if node_ref.index < node_ref.node.len() {
+                    node_ref.index += 1;
+                }
                 break;
             };
 

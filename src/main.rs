@@ -99,18 +99,20 @@ fn run_basic_cursor_test() -> Result<()> {
     println!("\nrun_basic_cursor_test\n");
     // let node_manager = NodeManager::new("./my.db", 10, 128, 1024);
     let db = create_test_database()?;
-    let tx = db.begin_write();
-    let mut cursor = tx.cursor()?;
-    //let mut cursor = Cursor::new(0, Arc::new(node_manager))?;
-    while cursor.is_valid() {
-        println!(
-            "{:?} = {:?}",
-            String::from_utf8_lossy(cursor.key()),
-            String::from_utf8_lossy(cursor.value()),
-        );
-        cursor.next()?;
-    }
+    let mut tx = db.begin_write();
+    tx.traverse();
     Ok(())
+    // let mut cursor = tx.cursor()?;
+    // //let mut cursor = Cursor::new(0, Arc::new(node_manager))?;
+    // while cursor.is_valid() {
+    //     println!(
+    //         "{:?} = {:?}",
+    //         String::from_utf8_lossy(cursor.key()),
+    //         String::from_utf8_lossy(cursor.value()),
+    //     );
+    //     cursor.next()?;
+    // }
+    // Ok(())
 }
 
 fn run_basic_cursor_reverse_test() -> Result<()> {
@@ -218,6 +220,25 @@ fn run_get_put_test() -> Result<()> {
     Ok(())
 }
 
+fn run_tx_test() -> Result<()> {
+    let db = create_test_database()?;
+    let mut tx = db.begin_write();
+
+    for i in 0..30 {
+        let key = format!("key0000_{i}");
+        let value = format!("value_{i}");
+        tx.put(key.as_bytes(), value.as_bytes())?;
+    }
+
+    tx.commit()?;
+
+    let db = create_test_database()?;
+    let mut tx = db.begin_write();
+    tx.traverse();
+
+    Ok(())
+}
+
 // fn random_test() -> Result<()> {
 //     println!("\nrun_get_put_test\n");
 //     let db = create_test_database()?;
@@ -239,11 +260,13 @@ fn run_get_put_test() -> Result<()> {
 // }
 
 fn main() {
-    setup_test_for_cursor().expect("setup test for cursor");
+    // setup_test_for_cursor().expect("setup test for cursor");
     // run_basic_cursor_test().expect("basic cursor test");
     // run_basic_cursor_reverse_test().expect("basic cursor reverse test");
     // run_cursor_seek().expect("cursor seek");
-    run_get_put_test().expect("get put");
+    // run_basic_cursor_test().expect("cursor test 1");
+    run_tx_test().expect("get put");
+    // run_basic_cursor_test().expect("cursor test 1");
     // random_test().expect("random test");
 
     // let node_manager = NodeManager::new("./my.db", 10, 128, 1024);

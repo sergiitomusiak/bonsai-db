@@ -7,6 +7,7 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 
+use crate::free_list::FreeList;
 use crate::{
     format::{read_u16, read_u32, read_u64, write_u16, write_u32, write_u64},
     tx::TransactionId,
@@ -18,10 +19,25 @@ pub const FREELIST_NODE: u16 = 3;
 
 pub const MIN_KEYS_PER_PAGE: usize = 2;
 
+trait InternalNode {
+    fn size(&self) -> usize;
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BranchInternalNode {
     pub key: Vec<u8>,
     pub node_id: NodeId,
+}
+
+impl InternalNode for BranchInternalNode {
+    fn size(&self) -> usize {
+        // page id
+        size_of::<u64>() +
+        // key len field
+        size_of::<u16>() +
+        // key
+        self.key.len()
+    }
 }
 
 impl BranchInternalNode {
@@ -46,11 +62,15 @@ impl BranchInternalNode {
         })
     }
 
-    fn write<W: Write>(&self, writer: &mut W) -> Result<()> {
+    fn write<W: Write>(&self, writer: &mut W) -> Result<u64> {
+        let size =
+            std::mem::size_of::<u64>()
+            + std::mem::size_of::<u16>()
+            + self.key.len();
         write_u64(writer, self.node_id.node_address())?;
         write_u16(writer, self.key.len() as u16)?;
         writer.write_all(&self.key)?;
-        Ok(())
+        Ok(size as u64)
     }
 }
 
@@ -58,6 +78,19 @@ impl BranchInternalNode {
 pub struct LeafInternalNode {
     pub key: Vec<u8>,
     pub value: Vec<u8>,
+}
+
+impl InternalNode for LeafInternalNode {
+    fn size(&self) -> usize {
+        // key len field
+        size_of::<u16>() +
+        // key
+        self.key.len() +
+        // value len field
+        size_of::<u32>() +
+        // value
+        self.value.len()
+    }
 }
 
 impl LeafInternalNode {
@@ -207,12 +240,12 @@ pub enum InternalNodes {
 }
 
 impl InternalNodes {
-    pub fn size(&self) -> u32 {
-        let nodes_size: u32 = match self {
-            Self::Branch(nodes) => nodes.iter().map(|node| node.size() as u32).sum(),
-            Self::Leaf(nodes) => nodes.iter().map(|node| node.size() as u32).sum(),
+    pub fn size(&self) -> u64 {
+        let nodes_size: u64 = match self {
+            Self::Branch(nodes) => nodes.iter().map(|node| node.size() as u64).sum(),
+            Self::Leaf(nodes) => nodes.iter().map(|node| node.size() as u64).sum(),
         };
-        (NodeHeader::size() as u32) + nodes_size
+        (NodeHeader::size() as u64) + nodes_size
     }
 
     pub fn len(&self) -> usize {
@@ -296,6 +329,18 @@ impl InternalNodes {
         }
     }
 
+    pub fn set_page_address(&mut self, child_index: usize, child_page_address: Address) {
+        match self {
+            Self::Branch(nodes) => {
+                assert!(matches!(nodes[child_index].node_id, NodeId::Id(_)));
+                nodes[child_index].node_id = NodeId::Address(child_page_address);
+            },
+            Self::Leaf(_) => {
+                panic!("cannot update");
+            },
+        }
+    }
+
     fn split_branch(mut internal_nodes: Vec<BranchInternalNode>, threshold: usize) -> Vec<Self> {
         if internal_nodes.len() <= MIN_KEYS_PER_PAGE {
             return vec![Self::Branch(internal_nodes)];
@@ -359,8 +404,8 @@ impl InternalNodes {
         return Err(anyhow!("invalid node type {}", header.flags));
     }
 
-    pub fn write<W: Write>(&self, writer: &mut W, page_size: usize) -> Result<()> {
-        self.write_header(writer, page_size)?;
+    pub fn write<W: Write>(&self, writer: &mut W, page_size: usize) -> Result<NodeHeader> {
+        let node_header = self.write_header(writer, page_size)?;
         match self {
             Self::Branch(nodes) => {
                 for node in nodes {
@@ -373,10 +418,10 @@ impl InternalNodes {
                 }
             }
         }
-        Ok(())
+        Ok(node_header)
     }
 
-    fn write_header<W: Write>(&self, writer: &mut W, page_size: usize) -> Result<()> {
+    fn write_header<W: Write>(&self, writer: &mut W, page_size: usize) -> Result<NodeHeader> {
         let (nodes_len, nodes_size, flags) = match self {
             Self::Branch(nodes) => {
                 let nodes_size: usize = nodes.iter().map(|node| node.size()).sum();
@@ -397,12 +442,13 @@ impl InternalNodes {
             (data_size - page_size) / page_size
         };
 
-        NodeHeader {
+        let node_header = NodeHeader {
             flags,
             internal_nodes_len: nodes_len as u64,
             overflow_len: overflow_len as u64,
-        }
-        .write(writer)
+        };
+        node_header.write(writer)?;
+        Ok(node_header)
     }
 
     pub fn has_min_keys(&self) -> bool {
@@ -539,17 +585,38 @@ impl NodeManager {
     pub fn write_node(&self, page_id: Address, node: &InternalNodes) -> Result<()> {
         let mut file = self.get_file()?;
         file.seek(SeekFrom::Start(
-            self.initial_alignment + page_id as u64 * self.page_size as u64,
+            // self.initial_alignment +
+            page_id as u64,
         ))?;
-        let node = node.write(&mut file, self.page_size as usize)?;
+        node.write(&mut file, self.page_size as usize)?;
         self.release_file(file);
-        Ok(node)
+        Ok(())
+    }
+
+    pub fn write_freelist(&self, page_address: Address, freelist: &FreeList) -> Result<NodeHeader> {
+        let mut file = self.get_file()?;
+        file.seek(SeekFrom::Start(
+            // self.initial_alignment +
+            page_address as u64,
+        ))?;
+        let node_header = freelist.write(&mut file, self.page_size)?;
+        self.release_file(file);
+        Ok(node_header)
+    }
+
+    pub fn write_meta(&self, meta_node: &MetaNode) -> Result<()> {
+        let mut file = self.get_file()?;
+        let page_address = (meta_node.transaction_id%2)*MetaNode::page_size();
+        file.seek(SeekFrom::Start(page_address))?;
+        meta_node.write(&mut file)?;
+        Ok(())
     }
 
     pub fn read_node(&self, page_id: Address) -> Result<Arc<InternalNodes>> {
         let mut file = self.get_file()?;
         file.seek(SeekFrom::Start(
-            self.initial_alignment + page_id as u64 * self.page_size as u64,
+            // self.initial_alignment +
+            page_id as u64,
         ))?;
         let node = InternalNodes::read(&mut file)?;
         self.release_file(file);
@@ -558,6 +625,12 @@ impl NodeManager {
 
     pub fn page_size(&self) -> u32 {
         self.page_size
+    }
+
+    pub fn size(&self) -> Result<u64> {
+        let file = self.get_file()?;
+        let len = file.metadata()?.len();
+        Ok(len)
     }
 
     fn get_file(&self) -> Result<File> {
