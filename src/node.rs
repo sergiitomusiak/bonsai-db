@@ -6,6 +6,7 @@ use std::mem::size_of;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
+use std::u64;
 
 use crate::free_list::FreeList;
 use crate::{
@@ -130,9 +131,9 @@ impl NodeHeader {
         // flags
         std::mem::size_of::<u16>() as u64 +
         // internal_nodes_len
-        std::mem::size_of::<u32>() as u64 +
+        std::mem::size_of::<u64>() as u64 +
         // overflow_len
-        std::mem::size_of::<u32>() as u64
+        std::mem::size_of::<u64>() as u64
     }
 }
 
@@ -155,7 +156,7 @@ impl MetaNode {
         // transaction_id
         size_of::<u64>() +
         // checksum
-        size_of::<u64>()
+        size_of::<u32>()
     }
 
     pub fn page_size() -> u64 {
@@ -544,6 +545,7 @@ impl NodeManager {
         file.seek(SeekFrom::Start(page_address))?;
         meta_node.write(&mut file)?;
         file.flush()?;
+        self.release_file(file);
         Ok(())
     }
 
@@ -562,6 +564,7 @@ impl NodeManager {
     pub fn size(&self) -> Result<u64> {
         let file = self.get_file()?;
         let len = file.metadata()?.len();
+        self.release_file(file);
         Ok(len)
     }
 

@@ -141,7 +141,7 @@ fn run_get_put_test() -> Result<()> {
 fn run_tx_test() -> Result<()> {
     let db = create_test_database()?;
     let mut tx = db.begin_write();
-    for i in 0..30 {
+    for i in 0..100 {
         let key = format!("key0000_{i}");
         let value = format!("value_{i}");
         tx.put(key.as_bytes(), value.as_bytes())?;
@@ -168,7 +168,7 @@ fn run_tx_test() -> Result<()> {
 }
 
 fn main() {
-    // setup_test_for_cursor().expect("setup test for cursor");
+    setup_test_for_cursor().expect("setup test for cursor");
     // run_basic_cursor_test().expect("basic cursor test");
     // run_basic_cursor_reverse_test().expect("basic cursor reverse test");
     // run_cursor_seek().expect("cursor seek");

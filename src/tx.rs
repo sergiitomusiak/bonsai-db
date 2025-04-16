@@ -247,9 +247,17 @@ impl WriteTransaction {
     }
 
     pub fn split(&mut self) -> Result<()> {
-        if let NodeId::Id(node_id) = self.root_node_id {
-            self.traverse_split(node_id, 0)?;
+        let NodeId::Id(_) = self.root_node_id else {
+            return Ok(());
+        };
+
+        loop {
+            let split_count = self.traverse_split(self.root_node_id.id(), 0)?;
+            if split_count < 2 {
+                break;
+            }
         }
+
         Ok(())
     }
 
