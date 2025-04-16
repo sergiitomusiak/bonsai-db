@@ -1,6 +1,7 @@
 use crate::cursor::Cursor;
 use crate::node::{
-    Address, BranchInternalNode, InternalNodes, LeafInternalNode, MetaNode, Node, NodeHeader, NodeId, NodeReader, MIN_KEYS_PER_PAGE
+    Address, BranchInternalNode, InternalNodes, LeafInternalNode, Node, NodeHeader, NodeId,
+    NodeReader, MIN_KEYS_PER_PAGE,
 };
 use crate::{DatabaseInternal, Writer};
 use anyhow::{anyhow, Result};
@@ -16,17 +17,16 @@ pub struct WriteTransaction {
     nodes: HashMap<u64, InternalNodes>,
     parent: HashMap<u64, u64>,
     root_node_id: NodeId,
-    pending_free_pages: Vec<u64>,
+    pending_free_pages: Vec<(Address, NodeHeader)>,
     writer: Option<Writer>,
     transaction_id: TransactionId,
 }
 
 impl NodeReader for WriteTransaction {
-    fn read_node<'a>(&'a self, node_id: NodeId) -> Result<Node<'a>> {
+    fn read_node(&self, node_id: NodeId) -> Result<Node<'_>> {
         let node = match node_id {
             NodeId::Address(address) => {
-                let node = self.database.node_manager.read_node(address)?;
-                Node::ReadOnly(node)
+                Node::ReadOnly(self.database.node_manager.read_node(address)?)
             }
             NodeId::Id(node_id) => {
                 let node = self.nodes.get(&node_id).expect("tx nodes");
@@ -38,10 +38,7 @@ impl NodeReader for WriteTransaction {
 }
 
 impl WriteTransaction {
-    pub fn new(
-        database: Arc<DatabaseInternal>,
-        writer: Writer,
-    ) -> Self {
+    pub fn new(database: Arc<DatabaseInternal>, writer: Writer) -> Self {
         let transaction_id = writer.meta().transaction_id + 1;
         let root_node_address = writer.meta().root_node;
         Self {
@@ -73,7 +70,7 @@ impl WriteTransaction {
         self.update(Update::Delete(key.to_vec()))
     }
 
-    pub fn cursor<'a>(&'a self) -> Result<Cursor<'a>> {
+    pub fn cursor(&self) -> Result<Cursor<'_>> {
         Cursor::new(self.root_node_id, self)
     }
 
@@ -87,52 +84,55 @@ impl WriteTransaction {
 
     pub fn rollback(&mut self) -> Result<()> {
         let writer = self.writer.as_mut().expect("writer");
-        writer.freelist.rollback(self.transaction_id);
-        // TODO?: Reload freelist
+        writer.free_list.rollback(self.transaction_id);
         Ok(())
     }
 
     fn commit_internal(&mut self) -> Result<()> {
         self.merge()?;
         self.split()?;
-        self.write_freelist()?;
         let NodeId::Id(node_id) = self.root_node_id else {
             return Ok(());
         };
         let root_node_address = self.traverse_write(node_id)?;
         self.root_node_id = NodeId::Address(root_node_address);
         self.write_meta_node()?;
-        // TODO: Allocate and write dirty nodes
-        // TODO: Clean-up unused pages
-        // TODO: Update database state
-        // TODO: Update meta page
-        // TODO: Release write token (impl Drop)
         Ok(())
     }
 
-    fn write_freelist(&mut self) -> Result<()> {
-        let freelist_size = {
+    fn write_free_list(&mut self) -> Result<(Address, NodeHeader)> {
+        let free_list_size = {
             let writer = self.writer.as_mut().expect("writer");
-            let size = NodeHeader::size() as u64 + writer.freelist.size() as u64;
+            let size = NodeHeader::size() + writer.free_list.size() as u64;
             let page_size = self.database.page_size as u64;
-            let pages = ((size + page_size - 1) / page_size) as u64;
+            let pages = size.div_ceil(page_size);
             assert!(pages > 0);
-            writer.freelist.free(
-                writer.meta().transaction_id,
-                writer.freelist_node_address,
-                writer.freelist_header.overflow_len,
+            writer.free_list.free(
+                self.transaction_id,
+                writer.free_list_node_address,
+                writer.free_list_header.overflow_len,
+                page_size,
             );
-            writer.freelist.size()
+
+            for (page_address, header) in self.pending_free_pages.drain(..) {
+                writer.free_list.free(
+                    self.transaction_id,
+                    page_address,
+                    header.overflow_len,
+                    page_size,
+                );
+            }
+
+            writer.free_list.size()
         };
-        let page_address = self.allocate(freelist_size as u64)?;
+
+        let page_address = self.allocate(free_list_size as u64)?;
         let writer = self.writer.as_ref().expect("writer");
-        let node_header = self.database.node_manager.write_freelist(page_address, &writer.freelist)?;
-        {
-            let writer = self.writer.as_mut().expect("writer");
-            writer.freelist_header = node_header;
-            writer.freelist_node_address = page_address;
-        }
-        Ok(())
+        let node_header = self
+            .database
+            .node_manager
+            .write_free_list(page_address, &writer.free_list)?;
+        Ok((page_address, node_header))
     }
 
     fn traverse_write(&mut self, node_id: u64) -> Result<Address> {
@@ -150,24 +150,30 @@ impl WriteTransaction {
             };
         }
 
-        let node_size = {
-            self.nodes.get(&node_id).expect("tx node").size()
-        };
+        let node_size = { self.nodes.get(&node_id).expect("tx node").size() };
         let page_address = self.allocate(node_size)?;
         let node = self.nodes.get(&node_id).expect("tx node");
         self.database.node_manager.write_node(page_address, node)?;
-
         Ok(page_address)
     }
 
     fn write_meta_node(&mut self) -> Result<()> {
+        let (free_list_node_address, free_list_header) = self.write_free_list()?;
+
         let writer = self.writer.as_mut().expect("writer");
         let mut meta = writer.meta().clone();
         meta.transaction_id = self.transaction_id;
         meta.root_node = self.root_node_id.node_address();
-        meta.freelist_node = writer.freelist_node_address;
+        meta.free_list_node = free_list_node_address;
         self.database.node_manager.write_meta(&meta)?;
         *writer.meta_mut() = meta;
+
+        println!("COMMITTING FREE LIST: {:?}", writer.free_list);
+        writer.free_list_header = free_list_header;
+        writer.free_list_node_address = free_list_node_address;
+        writer.free_list.commit_allocations();
+        println!("COMMITTED FREE LIST: {:?}", writer.free_list);
+
         Ok(())
     }
 
@@ -177,8 +183,14 @@ impl WriteTransaction {
 
     fn allocate(&mut self, required_size: u64) -> Result<Address> {
         let page_size = self.database.page_size as u64;
-        let required_pages = ((required_size + page_size - 1) / page_size) as usize;
-        if let Some(page_address) = self.writer.as_mut().expect("tx writer").freelist.allocate(required_pages) {
+        let required_pages = required_size.div_ceil(page_size);
+        let page_address = self
+            .writer
+            .as_mut()
+            .expect("tx writer")
+            .free_list
+            .allocate(required_pages, page_size);
+        if let Some(page_address) = page_address {
             return Ok(page_address);
         }
         let file_size = self.database.node_manager.size()?;
@@ -319,7 +331,7 @@ impl WriteTransaction {
         self.pending_free_pages.extend(
             new_dirty_nodes
                 .iter()
-                .map(|(_, node_address, _)| *node_address),
+                .map(|(_, node_address, (header, _))| (*node_address, header.clone())),
         );
         new_dirty_nodes.reverse();
         existing_dirty_nodes.reverse();
@@ -338,7 +350,7 @@ impl WriteTransaction {
             let (index, _node_address, node) = new_dirty_nodes
                 .pop()
                 .ok_or_else(|| anyhow!("database is corrupted"))?;
-            let node_id = self.insert_new(node);
+            let node_id = self.insert_new(node.1);
             let node = self.nodes.get_mut(&node_id).expect("node must exist");
             let InternalNodes::Leaf(ref mut nodes) = node else {
                 panic!("expected leaf node");
@@ -373,7 +385,7 @@ impl WriteTransaction {
         // Create new dirty branch nodes with potentially updated key item
         let mut update_branch_key = items_shifted && index == 0;
         while let Some((index, _node_address, mut node)) = new_dirty_nodes.pop() {
-            let InternalNodes::Branch(ref mut nodes) = node else {
+            let InternalNodes::Branch(ref mut nodes) = node.1 else {
                 panic!("expected branch node");
             };
 
@@ -383,14 +395,14 @@ impl WriteTransaction {
             }
 
             update_branch_key &= index == 0;
-            let inserted_node_id = self.insert_new(node);
+            let inserted_node_id = self.insert_new(node.1);
             self.insert_parent(last_node_id, inserted_node_id);
             last_node_id = inserted_node_id;
         }
 
         if has_new_dirty_nodes {
             if let Some((index, node_id)) = existing_dirty_nodes.last() {
-                let node = self.nodes.get_mut(&node_id).expect("node must exist");
+                let node = self.nodes.get_mut(node_id).expect("node must exist");
 
                 let InternalNodes::Branch(ref mut nodes) = node else {
                     panic!("expected branch node");
@@ -427,7 +439,7 @@ impl WriteTransaction {
         if is_root {
             let root = self.nodes.get_mut(&node_id).expect("root node");
 
-            if root.len() == 0 {
+            if root.is_empty() {
                 let parent = InternalNodes::Leaf(Vec::new());
                 let parent_id = self.insert_new(parent);
                 self.root_node_id = NodeId::Id(parent_id);
@@ -454,7 +466,7 @@ impl WriteTransaction {
         let parent_id = *self.parent.get(&node_id).expect("node parent");
         {
             let node = self.nodes.get(&node_id).expect("node");
-            if node.len() == 0 {
+            if node.is_empty() {
                 let removed = self.parent.remove(&node_id).is_some();
                 assert!(removed, "parent node must be removed");
                 let removed = self.nodes.remove(&node_id).is_some();
@@ -549,7 +561,7 @@ impl WriteTransaction {
             .nodes
             .remove(&node_id)
             .expect("split node")
-            .split(page_size as usize);
+            .split(page_size as u64);
 
         if nodes.len() == 1 {
             // If node was not split just re-insert it back
@@ -598,7 +610,7 @@ impl WriteTransaction {
         match nodes[child_index].node_id {
             NodeId::Id(child_node_id) => Ok(child_node_id),
             NodeId::Address(page_address) => {
-                let node = self
+                let (header, node) = self
                     .database
                     .node_manager
                     .read_node(page_address)?
@@ -606,6 +618,7 @@ impl WriteTransaction {
                     .clone();
 
                 let child_node_id = self.insert_new(node);
+                self.pending_free_pages.push((page_address, header));
                 self.insert_parent(child_node_id, node_id);
                 Ok(child_node_id)
             }
@@ -628,11 +641,8 @@ impl WriteTransaction {
 
 impl Drop for WriteTransaction {
     fn drop(&mut self) {
-        self.database.release_writer(
-            self.writer
-                .take()
-                .expect("writer tx must own writer token"),
-        );
+        self.database
+            .release_writer(self.writer.take().expect("writer tx must own writer token"));
     }
 }
 

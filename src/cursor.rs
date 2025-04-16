@@ -6,9 +6,6 @@ pub struct Cursor<'a> {
     pub root_node_id: NodeId,
     pub stack: Vec<CursorNodeRef<'a>>,
     pub node_reader: &'a dyn NodeReader,
-    // pub node_manager: Arc<NodeManager>,
-    // pub state: Arc<DatabaseState>,
-    // pub current_node: Arc<InternalNodes>,
 }
 
 #[derive(Clone, Debug)]
@@ -65,7 +62,7 @@ impl<'a> Cursor<'a> {
         element.index = 0;
         self.move_to_first_leaf()?;
         if self.stack.last().expect("cursor stack top").node.is_empty() {
-            self.next()?;
+            self.next_entry()?;
         }
         Ok(())
     }
@@ -80,12 +77,12 @@ impl<'a> Cursor<'a> {
         };
         self.move_to_last_leaf()?;
         if self.stack.last().expect("cursor stack top").node.is_empty() {
-            self.next()?;
+            self.next_entry()?;
         }
         Ok(())
     }
 
-    pub fn prev(&mut self) -> Result<bool> {
+    pub fn prev_entry(&mut self) -> Result<bool> {
         let element = self.stack.last_mut().expect("cursor stack top");
         if element.index > 0 {
             assert!(element.node.is_leaf(), "cursor must point to a leaf node");
@@ -118,7 +115,7 @@ impl<'a> Cursor<'a> {
         Ok(true)
     }
 
-    pub fn next(&mut self) -> Result<()> {
+    pub fn next_entry(&mut self) -> Result<()> {
         let element = self.stack.last_mut().expect("cursor stack top");
         if !element.node.is_empty() && element.index < element.node.len() - 1 {
             assert!(element.node.is_leaf(), "cursor must point to a leaf node");
@@ -157,10 +154,8 @@ impl<'a> Cursor<'a> {
 
     pub fn seek(&mut self, key: &[u8]) -> Result<()> {
         self.stack.drain(1..);
-
         loop {
             let element = self.stack.last_mut().expect("cursor stack top");
-
             // binary search on current node
             match element.node.as_ref() {
                 InternalNodes::Branch(nodes) => {
@@ -182,7 +177,7 @@ impl<'a> Cursor<'a> {
                 }
                 InternalNodes::Leaf(nodes) => {
                     if element.node.is_empty() {
-                        self.next()?;
+                        self.next_entry()?;
                     } else {
                         let index = nodes
                             .binary_search_by(|node| {
@@ -193,12 +188,11 @@ impl<'a> Cursor<'a> {
 
                         if index > element.node.len() - 1 {
                             element.index = element.node.len() - 1;
-                            self.next()?;
+                            self.next_entry()?;
                         } else {
                             element.index = index;
                         }
                     }
-
                     break;
                 }
             };
@@ -210,14 +204,11 @@ impl<'a> Cursor<'a> {
     fn move_to_first_leaf(&mut self) -> Result<()> {
         loop {
             let element = self.stack.last().expect("cursor stack last element");
-
             let InternalNodes::Branch(ref nodes) = element.node.as_ref() else {
                 break;
             };
-
             let node_address = nodes[element.index].node_id;
             let node = self.node_reader.read_node(node_address)?;
-
             self.stack.push(CursorNodeRef {
                 node,
                 index: 0,
@@ -230,11 +221,9 @@ impl<'a> Cursor<'a> {
     fn move_to_last_leaf(&mut self) -> Result<()> {
         loop {
             let element = self.stack.last().expect("cursor stack last element");
-
             let InternalNodes::Branch(ref nodes) = element.node.as_ref() else {
                 break;
             };
-
             let node_address = nodes[element.index].node_id;
             let node = self.node_reader.read_node(node_address)?;
             let index = if node.is_empty() { 0 } else { node.len() - 1 };

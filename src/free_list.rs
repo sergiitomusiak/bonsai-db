@@ -1,6 +1,6 @@
 use crate::{
-    format::{read_u64, read_vec_u64, write_slice_u64, write_u64},
-    node::{Address, NodeHeader, NodeManager, FREELIST_NODE},
+    format::{read_vec_u64, write_slice_u64},
+    node::{Address, NodeHeader, FREELIST_NODE},
     tx::TransactionId,
 };
 
@@ -12,35 +12,37 @@ use std::mem::size_of;
 #[derive(Debug, Default)]
 pub struct FreeList {
     pub free: BTreeSet<Address>,
-    pub pending: BTreeMap<TransactionId, BTreeSet<Address>>,
+    pub pending_allocated: BTreeSet<Address>,
+    pub pending_free: BTreeMap<TransactionId, BTreeSet<Address>>,
     pub cache: HashSet<Address>,
 }
 
 impl FreeList {
-    pub fn allocate(&mut self, required_pages: usize) -> Option<Address> {
-        let required_pages = required_pages as u64;
-        let mut previous_page_id: Option<Address> = None;
-        let mut initial_page_id = *self.free.first()?;
+    pub fn allocate(&mut self, required_pages: u64, page_size: u64) -> Option<Address> {
+        let mut previous_page_address: Option<Address> = None;
+        let mut initial_page_address = *self.free.first()?;
 
-        for page_id in self.free.iter() {
-            assert!(*page_id > 1, "invalid page allocation: {page_id}");
+        for page_address in self.free.difference(&self.pending_allocated) {
+            // assert!(*page_address > 1, "invalid page allocation: {page_address}");
 
-            let restart_initial_page = previous_page_id
-                .map(|previous_page_id| page_id - previous_page_id != 1)
+            let restart_initial_page = previous_page_address
+                .map(|previous_page_address| page_address - previous_page_address != page_size)
                 .unwrap_or(false);
 
             if restart_initial_page {
-                initial_page_id = *page_id;
+                initial_page_address = *page_address;
             }
 
-            if page_id - initial_page_id + 1 == required_pages as Address {
+            if (page_address - initial_page_address) / page_size + 1 == required_pages as Address {
                 // Remove found pages from free list
                 for i in 0..required_pages {
-                    self.free.remove(&(initial_page_id + i));
+                    self.free.remove(&(initial_page_address + i * page_size));
+                    self.pending_allocated
+                        .insert(initial_page_address + i * page_size);
                 }
-                return Some(initial_page_id);
+                return Some(initial_page_address);
             }
-            previous_page_id = Some(*page_id);
+            previous_page_address = Some(*page_address);
         }
 
         None
@@ -52,7 +54,8 @@ impl FreeList {
         let free = BTreeSet::from_iter(free);
         let node = Self {
             free,
-            pending: BTreeMap::new(),
+            pending_allocated: BTreeSet::new(),
+            pending_free: BTreeMap::new(),
             cache: HashSet::new(),
         };
         println!("FREE LIST: {node:?}");
@@ -62,8 +65,8 @@ impl FreeList {
     pub fn write<W: Write>(&self, writer: &mut W, page_size: u32) -> Result<NodeHeader> {
         let page_size = page_size as u64;
         let data = self.copy_all();
-        let data_size = NodeHeader::size() as u64 + (self.size()) as u64;
-        let overflow_len = if data_size <= page_size as u64 {
+        let data_size = NodeHeader::size() + (self.size()) as u64;
+        let overflow_len = if data_size <= page_size {
             0
         } else {
             (data_size - page_size) / page_size
@@ -78,26 +81,36 @@ impl FreeList {
         Ok(header)
     }
 
-    pub fn free(&mut self, transaction_id: TransactionId, page_id: Address, page_overflow: u64) {
-        // assert!(page_id > 1, "freeing page id must be greater than 1");
-        let pending = self.pending.entry(transaction_id).or_default();
-        let overflow = page_id + page_overflow;
-        for page_id in page_id..=overflow {
-            let inserted = self.cache.insert(page_id);
-            assert!(inserted, "page {page_id} is already free");
-            pending.insert(page_id);
+    pub fn free(
+        &mut self,
+        transaction_id: TransactionId,
+        page_start_address: Address,
+        page_overflow: u64,
+        page_size: u64,
+    ) {
+        let pending = self.pending_free.entry(transaction_id).or_default();
+        let page_end_addess = page_start_address + (page_overflow + 1) * page_size;
+        let mut page_address = page_start_address;
+        while page_address < page_end_addess {
+            let inserted = self.cache.insert(page_address);
+            assert!(inserted, "page {page_address} is already free");
+            pending.insert(page_address);
+            page_address += page_size;
         }
     }
 
     pub fn release(&mut self, transaction_id: TransactionId) {
         let txs = self
-            .pending
+            .pending_free
             .range(..=transaction_id)
             .map(|(tx_id, _)| *tx_id)
             .collect::<Vec<_>>();
 
         for tx_id in txs {
-            let pages = self.pending.remove(&tx_id).expect("pending transactions");
+            let pages = self
+                .pending_free
+                .remove(&tx_id)
+                .expect("pending transactions");
 
             self.free.extend(pages);
         }
@@ -112,36 +125,41 @@ impl FreeList {
     }
 
     pub fn pending_pages_len(&self) -> usize {
-        self.pending.iter().map(|(_, pages)| pages.len()).sum()
+        self.pending_free.values().map(|pages| pages.len()).sum()
     }
-
-    // pub fn reload(&mut self, other: FreeList) -> Result<()> {
-    //     // let freelist = node_manager.read_node(page_id)
-    //     todo!()
-    // }
 
     fn copy_all(&self) -> Vec<u64> {
         let pending = self
-            .pending
+            .pending_free
             .iter()
-            .flat_map(|(_, pages)| pages.iter().map(|page_id| *page_id))
+            .flat_map(|(_, pages)| pages.iter().copied())
             .collect::<BTreeSet<_>>();
 
-        self.free.union(&pending).map(|page_id| *page_id).collect()
+        self.free
+            .union(&pending)
+            .copied()
+            .collect()
+    }
+
+    pub fn commit_allocations(&mut self) {
+        self.pending_allocated.clear();
     }
 
     pub fn rollback(&mut self, transaction_id: TransactionId) {
-        let Some(pages) = self.pending.remove(&transaction_id) else {
+        let Some(pages) = self.pending_free.remove(&transaction_id) else {
             return;
         };
 
         for page in pages {
             self.cache.remove(&page);
         }
+
+        self.free.extend(self.pending_allocated.iter());
+        self.pending_allocated.clear();
     }
 
-    pub fn is_page_freed(&self, page_id: Address) -> bool {
-        self.cache.contains(&page_id)
+    pub fn is_page_freed(&self, page_address: Address) -> bool {
+        self.cache.contains(&page_address)
     }
 }
 
@@ -166,53 +184,53 @@ mod tests {
     #[test]
     fn allocates_multiple_pages_at_the_start() {
         let mut free_list = FreeList::default();
-        free_list.free = free_list![2, 3, 4, 5, 11, 13, 15, 16, 17, 18];
-        let page_id = free_list.allocate(4);
-        assert_eq!(page_id, Some(2));
-        assert_eq!(free_list.free, free_list![11, 13, 15, 16, 17, 18]);
+        free_list.free = free_list![20, 30, 40, 50, 110, 130, 150, 160, 170, 180];
+        let page_address = free_list.allocate(4, 10);
+        assert_eq!(page_address, Some(20));
+        assert_eq!(free_list.free, free_list![110, 130, 150, 160, 170, 180]);
     }
 
     #[test]
     fn allocates_multiple_pages_at_the_middle() {
         let mut free_list = FreeList::default();
-        free_list.free = free_list![2, 11, 13, 15, 16, 17, 18];
-        let page_id = free_list.allocate(3);
-        assert_eq!(page_id, Some(15));
-        assert_eq!(free_list.free, free_list![2, 11, 13, 18]);
+        free_list.free = free_list![20, 110, 130, 150, 160, 170, 180];
+        let page_address = free_list.allocate(3, 10);
+        assert_eq!(page_address, Some(150));
+        assert_eq!(free_list.free, free_list![20, 110, 130, 180]);
     }
 
     #[test]
     fn allocates_multiple_pages_at_the_end() {
         let mut free_list = FreeList::default();
-        free_list.free = free_list![2, 11, 13, 15, 16, 17, 18];
-        let page_id = free_list.allocate(4);
-        assert_eq!(page_id, Some(15));
-        assert_eq!(free_list.free, free_list![2, 11, 13]);
+        free_list.free = free_list![20, 110, 130, 150, 160, 170, 180];
+        let page_address = free_list.allocate(4, 10);
+        assert_eq!(page_address, Some(150));
+        assert_eq!(free_list.free, free_list![20, 110, 130]);
     }
 
     #[test]
     fn allocates_one_page() {
         let mut free_list = FreeList::default();
-        free_list.free = free_list![2, 11, 13, 15, 16, 17, 18];
-        let page_id = free_list.allocate(1);
-        assert_eq!(page_id, Some(2));
-        assert_eq!(free_list.free, free_list![11, 13, 15, 16, 17, 18]);
+        free_list.free = free_list![20, 110, 130, 150, 160, 170, 180];
+        let page_address = free_list.allocate(1, 10);
+        assert_eq!(page_address, Some(20));
+        assert_eq!(free_list.free, free_list![110, 130, 150, 160, 170, 180]);
     }
 
     #[test]
     fn cannot_allocates_when_page_runs_are_too_small() {
         let mut free_list = FreeList::default();
-        free_list.free = free_list![2, 11, 13, 15, 16, 17, 18];
-        let page_id = free_list.allocate(10);
-        assert_eq!(page_id, None);
-        assert_eq!(free_list.free, free_list![2, 11, 13, 15, 16, 17, 18]);
+        free_list.free = free_list![20, 110, 130, 150, 160, 170, 180];
+        let page_address = free_list.allocate(10, 10);
+        assert_eq!(page_address, None);
+        assert_eq!(free_list.free, free_list![20, 110, 130, 150, 160, 170, 180]);
     }
 
     #[test]
     fn cannot_allocates_when_no_free_pages() {
         let mut free_list = FreeList::default();
-        let page_id = free_list.allocate(1);
-        assert_eq!(page_id, None);
+        let page_address = free_list.allocate(1, 10);
+        assert_eq!(page_address, None);
         assert!(free_list.free.is_empty());
     }
 

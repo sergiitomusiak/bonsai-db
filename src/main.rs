@@ -1,9 +1,5 @@
 use anyhow::Result;
-use bonsai_db::{
-    node::{BranchInternalNode, InternalNodes, LeafInternalNode, NodeId, NodeManager},
-    Database, DatabaseInternal, Options,
-};
-use std::sync::Arc;
+use bonsai_db::{Database, Options};
 
 fn setup_test_for_cursor() -> Result<()> {
     let path = "./my.db";
@@ -17,74 +13,10 @@ fn setup_test_for_cursor() -> Result<()> {
             cache_size: 1 << 10,
         },
     )?;
-    // std::fs::File::create(&path)?;
-    // let node_manager = NodeManager::new("./my.db", 10, 128);
-
-    // Root
-    // let node = InternalNodes::Branch(vec![
-    //     BranchInternalNode {
-    //         key: b"key10".to_vec(),
-    //         node_id: NodeId::Address(1),
-    //     },
-    //     BranchInternalNode {
-    //         key: b"key20".to_vec(),
-    //         node_id: NodeId::Address(2),
-    //     },
-    //     BranchInternalNode {
-    //         key: b"key30".to_vec(),
-    //         node_id: NodeId::Address(3),
-    //     },
-    // ]);
-    // node_manager.write_node(0, &node)?;
-
-    // // Child1
-    // let node = InternalNodes::Leaf(vec![
-    //     LeafInternalNode {
-    //         key: b"key10".to_vec(),
-    //         value: b"value10".to_vec(),
-    //     },
-    //     LeafInternalNode {
-    //         key: b"key12".to_vec(),
-    //         value: b"value12".to_vec(),
-    //     },
-    // ]);
-    // node_manager.write_node(1, &node)?;
-
-    // // Child2
-    // let node = InternalNodes::Leaf(vec![
-    //     LeafInternalNode {
-    //         key: b"key20".to_vec(),
-    //         value: b"value20".to_vec(),
-    //     },
-    //     LeafInternalNode {
-    //         key: b"key22".to_vec(),
-    //         value: b"value22".to_vec(),
-    //     },
-    // ]);
-    // node_manager.write_node(2, &node)?;
-
-    // // Child3
-    // let node = InternalNodes::Leaf(vec![
-    //     LeafInternalNode {
-    //         key: b"key30".to_vec(),
-    //         value: b"value30".to_vec(),
-    //     },
-    //     LeafInternalNode {
-    //         key: b"key32".to_vec(),
-    //         value: b"value32".to_vec(),
-    //     },
-    // ]);
-    // node_manager.write_node(3, &node)?;
-
     Ok(())
 }
 
 fn create_test_database() -> Result<Database> {
-    // let node_manager = NodeManager::new("./my.db", 10, 128);
-    // Ok(Arc::new(DatabaseInternal {
-    //     node_manager,
-    //     root_node_id: NodeId::Address(0),
-    // }))
     Database::open(
         "./my.db",
         Options {
@@ -97,28 +29,14 @@ fn create_test_database() -> Result<Database> {
 
 fn run_basic_cursor_test() -> Result<()> {
     println!("\nrun_basic_cursor_test\n");
-    // let node_manager = NodeManager::new("./my.db", 10, 128, 1024);
     let db = create_test_database()?;
     let mut tx = db.begin_write();
     tx.traverse();
     Ok(())
-    // let mut cursor = tx.cursor()?;
-    // //let mut cursor = Cursor::new(0, Arc::new(node_manager))?;
-    // while cursor.is_valid() {
-    //     println!(
-    //         "{:?} = {:?}",
-    //         String::from_utf8_lossy(cursor.key()),
-    //         String::from_utf8_lossy(cursor.value()),
-    //     );
-    //     cursor.next()?;
-    // }
-    // Ok(())
 }
 
 fn run_basic_cursor_reverse_test() -> Result<()> {
     println!("\nrun_basic_cursor_reverse_test\n");
-    // let node_manager = NodeManager::new("./my.db", 10, 128, 1024);
-    // let mut cursor = Cursor::new(NodeId::Address(0), Arc::new(node_manager))?;
     let db = create_test_database()?;
     let tx = db.begin_write();
     let mut cursor = tx.cursor()?;
@@ -129,7 +47,7 @@ fn run_basic_cursor_reverse_test() -> Result<()> {
             String::from_utf8_lossy(cursor.key()),
             String::from_utf8_lossy(cursor.value()),
         );
-        if !cursor.prev()? {
+        if !cursor.prev_entry()? {
             break;
         }
     }
@@ -223,15 +141,25 @@ fn run_get_put_test() -> Result<()> {
 fn run_tx_test() -> Result<()> {
     let db = create_test_database()?;
     let mut tx = db.begin_write();
-
     for i in 0..30 {
         let key = format!("key0000_{i}");
         let value = format!("value_{i}");
         tx.put(key.as_bytes(), value.as_bytes())?;
     }
-
     tx.commit()?;
 
+    let db = create_test_database()?;
+    let mut tx = db.begin_write();
+    for i in 0..30 {
+        let key = format!("key0000_{i}");
+        let value = format!("VALUE_{i}");
+        tx.put(key.as_bytes(), value.as_bytes())?;
+    }
+    println!("TRAVERSING 1");
+    tx.traverse();
+    tx.commit()?;
+
+    println!("TRAVERSING 2");
     let db = create_test_database()?;
     let mut tx = db.begin_write();
     tx.traverse();
@@ -239,308 +167,12 @@ fn run_tx_test() -> Result<()> {
     Ok(())
 }
 
-// fn random_test() -> Result<()> {
-//     println!("\nrun_get_put_test\n");
-//     let db = create_test_database()?;
-//     let mut tx = db.begin_write();
-
-//     tx.put(b"system:path", b"/usr/local/bin")?;
-//     tx.put(b"system:user:1000", b"sergii")?;
-
-//     println!("\n==============================\n");
-//     tx.traverse();
-//     tx.merge()?;
-//     println!("\n======\n");
-//     tx.traverse();
-//     tx.split()?;
-//     println!("\n======\n");
-//     tx.traverse();
-
-//     Ok(())
-// }
-
 fn main() {
     // setup_test_for_cursor().expect("setup test for cursor");
     // run_basic_cursor_test().expect("basic cursor test");
     // run_basic_cursor_reverse_test().expect("basic cursor reverse test");
     // run_cursor_seek().expect("cursor seek");
     // run_basic_cursor_test().expect("cursor test 1");
-    run_tx_test().expect("get put");
+    run_tx_test().expect("run tx");
     // run_basic_cursor_test().expect("cursor test 1");
-    // random_test().expect("random test");
-
-    // let node_manager = NodeManager::new("./my.db", 10, 128, 1024);
-
-    // let node = InternalNodes::Leaf(vec![
-    //     LeafInternalNode {
-    //         key: b"hello".to_vec(),
-    //         value: b"world".to_vec(),
-    //     },
-    //     LeafInternalNode {
-    //         key: b"hey".to_vec(),
-    //         value: b"man".to_vec(),
-    //     },
-    // ]);
-
-    // node_manager.write_node(0, &node).expect("write");
-    // node_manager.write_node(1, &node).expect("write");
-
-    // let node = node_manager.read_node(1).expect("read");
-    // let InternalNodes::Leaf(nodes) = node else {
-    //     panic!("unexpected node type");
-    // };
-
-    // for n in nodes {
-    //     println!("{:?} {:?}", String::from_utf8_lossy(&n.key), String::from_utf8_lossy(&n.value));
-    // }
-
-    // let _db = Database::open("./my.db", Options::default())
-    //     .expect("open database");
-
-    //let f = std::fs::File::create("test.txt").unwrap();
-    //f.try_clone()
-    // let mut bucket = Bucket::new();
-    // for i in 0..50 {
-    //     bucket.put(format!("{:03}", i), format!("value_{i}"));
-    // }
-
-    // for i in 0..100 {
-    //     let value = bucket.get(format!("{:03}", i));
-    //     println!("key = {i}, value = {value:?}");
-    // }
-
-    // println!("{bucket:#?}");
-
-    // let value = 40;
-    // let data = vec![10, 20, 30];
-    // let res = data.binary_search_by(|item| item.cmp(&value));
-    // println!("{res:?}");
 }
-
-// const INITIAL_ROOT_NODE_ID: NodeId = 0;
-// const MAX_INTERNAL_NODES: usize = 30;
-
-// type TransactionId = u64;
-// type PageId = u64;
-// type NodeId = usize;
-// type Key = String;
-// type Value = String;
-
-// // type Key = Vec<u8>;
-// // type Value = Vec<u8>;
-
-// #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// enum NodeType {
-//     Branch,
-//     Leaf,
-// }
-
-// #[derive(Debug)]
-// struct Node {
-//     parent_node_id: Option<NodeId>,
-//     node_type: NodeType,
-//     internal_nodes: Vec<InternalNode>,
-// }
-
-// impl Node {
-//     fn new(node_type: NodeType) -> Self {
-//         Self {
-//             parent_node_id: None,
-//             node_type,
-//             internal_nodes: Vec::new(),
-//         }
-//     }
-
-//     fn is_leaf(&self) -> bool {
-//         self.node_type == NodeType::Leaf
-//     }
-
-//     fn child_index(&self, node_id: NodeId) -> Option<usize> {
-//         self.internal_nodes
-//             .iter()
-//             .enumerate()
-//             .find(|(_, internal_node)| internal_node.node_id == Some(node_id))
-//             .map(|item| item.0)
-//     }
-// }
-
-// #[derive(Debug)]
-// struct InternalNode {
-//     node_id: Option<NodeId>,
-//     key: Key,
-//     value: Value,
-// }
-
-// #[derive(Debug)]
-// struct Bucket {
-//     root_node_id: NodeId,
-//     next_node_id: NodeId,
-//     nodes: HashMap<NodeId, Node>,
-// }
-
-// impl Bucket {
-//     fn new() -> Self {
-//         Self {
-//             root_node_id: INITIAL_ROOT_NODE_ID,
-//             next_node_id: INITIAL_ROOT_NODE_ID + 1,
-//             nodes: HashMap::from([(INITIAL_ROOT_NODE_ID, Node{
-//                 node_type: NodeType::Leaf,
-//                 parent_node_id: None,
-//                 internal_nodes: Vec::new(),
-//             })]),
-//         }
-//     }
-
-//     fn get(&self, key: Key) -> Option<Value> {
-//         let (node_id, index, exact_match) = self.seek(&key);
-//         if exact_match {
-//             Some(self.nodes[&node_id].internal_nodes[index].value.clone())
-//         } else {
-//             None
-//         }
-//     }
-
-//     fn put(&mut self, key: Key, value: Value) {
-//         let (node_id, index, exact_match) = self.seek(&key);
-//         let node = self.nodes.get_mut(&node_id).expect("get mut node");
-//         if exact_match {
-//             node.internal_nodes[index].key = value;
-//         } else {
-//             node.internal_nodes.insert(index, InternalNode {
-//                 node_id: None,
-//                 key,
-//                 value,
-//             });
-//         }
-//         self.split(node_id);
-//     }
-
-//     fn remove(&mut self, key: Key) {
-//         let (node_id, index, exact_match) = self.seek(&key);
-//         let node = self.nodes.get_mut(&node_id).expect("get mut node");
-//         if !exact_match {
-//             return;
-//         }
-//         node.internal_nodes.remove(index);
-//         self.merge(node_id);
-//     }
-
-//     fn merge(&mut self, mut node_id: NodeId) {
-//         // 1. merge with smaller sibling, and remove current node
-//         // 2. take nodes from either left or right sibling.
-//         // 3.
-//     }
-
-//     fn split(&mut self, mut node_id: NodeId) {
-//         if self.nodes[&node_id].internal_nodes.len() <= MAX_INTERNAL_NODES {
-//             return;
-//         }
-
-//         loop {
-//             if self.nodes[&node_id].internal_nodes.len() <= MAX_INTERNAL_NODES {
-//                 return;
-//             }
-
-//             let split_off_at = self.nodes
-//                 .get_mut(&node_id)
-//                 .expect("get mut node")
-//                 .internal_nodes.len() / 2;
-
-//             let new_internal_nodes = self
-//                 .nodes
-//                 .get_mut(&node_id)
-//                 .expect("get mut node")
-//                 .internal_nodes.split_off(split_off_at);
-
-//             let new_node = Node {
-//                 node_type: self.nodes[&node_id].node_type,
-//                 parent_node_id: self.nodes[&node_id].parent_node_id,
-//                 internal_nodes: new_internal_nodes,
-//             };
-
-//             let parent_node_id = new_node.parent_node_id;
-//             let new_node_id = self.next_id();
-//             let new_node_key = new_node.internal_nodes[0].key.clone();
-//             self.nodes.insert(new_node_id, new_node);
-
-//             node_id = if let Some(parent_node_id) = parent_node_id {
-//                 let child_index = self.nodes[&parent_node_id]
-//                     .child_index(node_id)
-//                     .expect("child index");
-
-//                 self.nodes.get_mut(&parent_node_id).expect("parent node")
-//                     .internal_nodes
-//                     .insert(child_index + 1, InternalNode {
-//                         node_id: Some(new_node_id),
-//                         key: new_node_key,
-//                         value: String::new(),
-//                     });
-//                 parent_node_id
-//             } else {
-//                 let parent_node_id = self.next_id();
-//                 let new_parent_node = Node {
-//                     node_type: NodeType::Branch,
-//                     parent_node_id: None,
-//                     internal_nodes: vec![
-//                         InternalNode {
-//                             node_id: Some(node_id),
-//                             key: self.nodes[&node_id].internal_nodes[0].key.clone(),
-//                             value: String::new(),
-//                         },
-//                         InternalNode {
-//                             node_id: Some(new_node_id),
-//                             key: new_node_key,
-//                             value: String::new(),
-//                         },
-//                     ],
-//                 };
-//                 self.nodes.insert(parent_node_id, new_parent_node);
-//                 self.root_node_id = parent_node_id;
-//                 self.nodes.get_mut(&node_id)
-//                     .expect("get mut node")
-//                     .parent_node_id = Some(parent_node_id);
-
-//                 self.nodes.get_mut(&new_node_id)
-//                     .expect("get mut node")
-//                     .parent_node_id = Some(parent_node_id);
-
-//                 parent_node_id
-//             };
-//         }
-//     }
-
-//     fn seek(&self, key: &Key) -> (NodeId, usize, bool) {
-//         let mut node_id = self.root_node_id;
-//         loop {
-//             // Get current node
-//             let node = &self.nodes[&node_id];
-//             let mut exact_match = false;
-//             let mut index = node
-//                 .internal_nodes
-//                 .binary_search_by(|internal_node| {
-//                     let res = internal_node.key.cmp(&key);
-//                     if res == Ordering::Equal {
-//                         exact_match = true;
-//                     }
-//                     res
-//                 })
-//                 .unwrap_or_else(identity);
-
-//             if node.is_leaf() {
-//                 return (node_id, index, exact_match);
-//             }
-
-//             if !exact_match && index > 0 {
-//                 index -=1;
-//             }
-
-//             node_id = node.internal_nodes[index].node_id.expect("branch node id");
-//         }
-//     }
-
-//     fn next_id(&mut self) -> NodeId {
-//         let node_id = self.next_node_id;
-//         self.next_node_id += 1;
-//         node_id
-//     }
-// }
