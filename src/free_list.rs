@@ -105,6 +105,7 @@ impl FreeList {
             .map(|(tx_id, _)| *tx_id)
             .collect::<Vec<_>>();
 
+        println!("RELEASING: {:?}", txs);
         for tx_id in txs {
             let pages = self
                 .pending_free

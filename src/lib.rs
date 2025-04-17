@@ -9,14 +9,9 @@ use anyhow::{anyhow, Result};
 use free_list::FreeList;
 use node::{Address, InternalNodes, MetaNode, NodeHeader, NodeManager};
 use std::{
-    io::{Seek, Write},
-    path::Path,
-    sync::{
-        Arc, Condvar, Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
+    collections::{btree_map::Entry, BTreeMap}, io::{Seek, Write}, path::Path, sync::{Arc, Condvar, Mutex, RwLock}
 };
-use tx::WriteTransaction;
+use tx::{ReadTransaction, TransactionId, WriteTransaction};
 
 pub type Key = Vec<u8>;
 pub type Value = Vec<u8>;
@@ -60,6 +55,10 @@ impl Database {
 
     pub fn begin_write(&self) -> WriteTransaction {
         self.internal.begin_write()
+    }
+
+    pub fn begin_read(&self) -> ReadTransaction {
+        self.internal.begin_read()
     }
 
     fn write_initial_state(
@@ -116,6 +115,15 @@ impl Database {
 
         file.flush()?;
 
+        let write_state = WriteState {
+            free_list,
+            free_list_node_address: free_list_address,
+            free_list_header,
+            meta_nodes,
+        };
+
+        let reader_meta = write_state.meta().clone();
+
         Ok(DatabaseInternal {
             node_manager: NodeManager::new(
                 file_path,
@@ -123,15 +131,18 @@ impl Database {
                 options.page_size,
                 options.cache_size,
             ),
-            writer: Mutex::new(Some(Writer {
-                free_list,
-                free_list_node_address: free_list_address,
-                free_list_header,
-                meta_nodes,
-            })),
-            writer_cond_var: Condvar::new(),
+            transaction_state: Mutex::new(TransactionState {
+                write_state: Some(write_state),
+                read_state: ReadState {
+                    meta_node: reader_meta,
+                    transactions: BTreeMap::new(),
+                },
+            }),
+            transaction_state_condvar: Condvar::new(),
             page_size: options.page_size,
-            root_node: AtomicU64::new(root_node_address),
+            // writer: Mutex::new(Some(writer)),
+            // writer_cond_var: Condvar::new(),
+            // reader_meta: RwLock::new(reader_meta),
         })
     }
 
@@ -170,7 +181,7 @@ impl Database {
 
         file.seek(std::io::SeekFrom::Start(meta_node.free_list_node))?;
         let (free_list_header, free_list) = FreeList::read(&mut file)?;
-        let root_node_address = meta_node.root_node;
+
         Ok(DatabaseInternal {
             node_manager: NodeManager::new(
                 file_path,
@@ -179,27 +190,40 @@ impl Database {
                 options.cache_size,
             ),
             page_size: meta_node.page_size,
-            writer: Mutex::new(Some(Writer {
-                free_list_header,
-                free_list,
-                free_list_node_address: meta_node.free_list_node,
-                meta_nodes: [meta_node.clone(), meta_node],
-            })),
-            writer_cond_var: Condvar::new(),
-            root_node: AtomicU64::new(root_node_address),
+            transaction_state: Mutex::new(TransactionState {
+                write_state: Some(WriteState {
+                    free_list_header,
+                    free_list,
+                    free_list_node_address: meta_node.free_list_node,
+                    meta_nodes: [meta_node.clone(), meta_node.clone()],
+                }),
+                read_state: ReadState {
+                    meta_node,
+                    transactions: BTreeMap::new(),
+                },
+            }),
+            transaction_state_condvar: Condvar::new(),
+            // writer: Mutex::new(Some(WriteState {
+            //     free_list_header,
+            //     free_list,
+            //     free_list_node_address: meta_node.free_list_node,
+            //     meta_nodes: [meta_node.clone(), meta_node.clone()],
+            // })),
+            // writer_cond_var: Condvar::new(),
+            // reader_meta: RwLock::new(meta_node),
         })
     }
 }
 
 #[derive(Debug)]
-pub struct Writer {
+pub struct WriteState {
     pub free_list_header: NodeHeader,
     pub free_list: FreeList,
     pub free_list_node_address: Address,
     pub meta_nodes: [MetaNode; 2],
 }
 
-impl Writer {
+impl WriteState {
     pub fn meta_mut(&mut self) -> &mut MetaNode {
         if self.meta_nodes[0].transaction_id < self.meta_nodes[1].transaction_id {
             &mut self.meta_nodes[1]
@@ -219,39 +243,89 @@ impl Writer {
 
 pub struct DatabaseInternal {
     pub node_manager: NodeManager,
-    pub writer: Mutex<Option<Writer>>,
-    pub writer_cond_var: Condvar,
+    // pub writer: Mutex<Option<WriteState>>,
+    // pub writer_cond_var: Condvar,
+    pub transaction_state: Mutex<TransactionState>,
+    pub transaction_state_condvar: Condvar,
     pub page_size: u32,
-    pub root_node: std::sync::atomic::AtomicU64,
+    // pub reader_meta: RwLock<MetaNode>,
 }
 
 impl DatabaseInternal {
     pub fn begin_write(self: &Arc<Self>) -> WriteTransaction {
-        let writer = self.take_writer();
+        let writer = self.take_write_state();
+        // TODO: Release pending free pages, and invalidate cache
         WriteTransaction::new(self.clone(), writer)
     }
 
-    pub fn take_writer(&self) -> Writer {
-        let mut writer_lock = self.writer.lock().expect("writer lock");
+    pub fn begin_read(self: &Arc<Self>) -> ReadTransaction {
+        let mut transaction_state_lock = self.transaction_state
+            .lock()
+            .expect("transaction state lock");
 
+        let root_node = transaction_state_lock.read_state.meta_node.root_node;
+        let transaction_id = transaction_state_lock.read_state.meta_node.transaction_id;
+        *transaction_state_lock.read_state.transactions
+            .entry(transaction_id)
+            .or_default() += 1;
+
+        ReadTransaction::new(self.clone(), root_node, transaction_id)
+    }
+
+    pub fn take_write_state(&self) -> WriteState {
+        let mut transaction_state_lock = self.transaction_state.lock().expect("writer lock");
         loop {
-            if let Some(writer) = writer_lock.take() {
-                return writer;
+            if let Some(mut write_state) = transaction_state_lock.write_state.take() {
+                let min_transaction_id = transaction_state_lock
+                    .read_state
+                    .transactions
+                    .first_key_value()
+                    .map(|(transaction_id, _)| *transaction_id)
+                    .unwrap_or(TransactionId::MAX);
+
+                if min_transaction_id > 0 {
+                    write_state.free_list.release(min_transaction_id-1);
+                }
+
+                return write_state;
             } else {
-                writer_lock = self
-                    .writer_cond_var
-                    .wait(writer_lock)
+                transaction_state_lock = self
+                    .transaction_state_condvar
+                    .wait(transaction_state_lock)
                     .expect("writer cond var");
             }
         }
     }
 
-    pub fn release_writer(&self, writer: Writer) {
-        let root_node = writer.meta().root_node;
-        let mut writer_lock = self.writer.lock().expect("files lock");
-        assert!(writer_lock.is_none(), "there must be only one writer token");
-        *writer_lock = Some(writer);
-        self.writer_cond_var.notify_one();
-        self.root_node.store(root_node, Ordering::Release);
+    pub fn release_writer(&self, writer: WriteState) {
+        let mut transaction_state_lock = self.transaction_state.lock().expect("transaction state lock");
+        assert!(transaction_state_lock.write_state.is_none(), "there must be only one writer token");
+        transaction_state_lock.read_state.meta_node = writer.meta().clone();
+        transaction_state_lock.write_state = Some(writer);
+        self.transaction_state_condvar.notify_one();
     }
+
+    pub fn release_reader(&self, transaction_id: TransactionId) {
+        let mut transaction_state_lock = self.transaction_state.lock().expect("transaction state lock");
+        match transaction_state_lock.read_state.transactions.entry(transaction_id) {
+            Entry::Occupied(mut entry) => {
+                if *entry.get() == 0 {
+                    entry.remove();
+                } else {
+                    *entry.get_mut() -= 1;
+                }
+            }
+            Entry::Vacant(_) => panic!("missing entries for transaction"),
+        }
+    }
+}
+
+pub struct ReadState {
+    pub meta_node: MetaNode,
+    pub transactions: BTreeMap<TransactionId, usize>,
+}
+
+pub struct TransactionState {
+    pub write_state: Option<WriteState>,
+    pub read_state: ReadState,
 }

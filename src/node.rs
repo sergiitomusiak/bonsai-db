@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Result};
-use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::hash::Hasher;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -9,9 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::u64;
 
-use crate::free_list::FreeList;
 use crate::{
     format::{read_u16, read_u32, read_u64, write_u16, write_u32, write_u64},
+    free_list::FreeList,
     tx::TransactionId,
 };
 
@@ -509,7 +508,6 @@ impl NodeManager {
         max_files: usize,
         page_size: u32,
         cache_size: u64,
-        // initial_alignment: u64,
     ) -> Self {
         Self {
             file_path: file_path.as_ref().to_path_buf(),
@@ -517,7 +515,6 @@ impl NodeManager {
             files: Mutex::default(),
             files_condvar: Condvar::new(),
             page_size,
-            // initial_alignment,
             nodes_cache: moka::sync::Cache::builder()
                 .weigher(|_, node: &Arc<(NodeHeader, InternalNodes)>| node.as_ref().1.size() as u32)
                 .max_capacity(cache_size)
@@ -552,28 +549,14 @@ impl NodeManager {
         meta_node.write(&mut file)?;
         file.flush()?;
         file.sync_all()?;
-
-        // TODO: invalidate cache?
-
         self.release_file(file);
         Ok(())
-    }
-
-    pub fn invalidate_cache(&self, page_addresses: BTreeSet<Address>) {
-        todo!()
     }
 
     pub fn read_node(&self, page_address: Address) -> Result<Arc<(NodeHeader, InternalNodes)>> {
         self.nodes_cache
             .try_get_with(page_address, || self.read_node_from_file(page_address))
             .map_err(|e| anyhow!("{e:?}"))
-
-        //self.nodes_cache.get_with(page_address, || self.read_node_from_file(page_address))
-        // let mut file = self.get_file()?;
-        // file.seek(SeekFrom::Start(page_address))?;
-        // let node = InternalNodes::read(&mut file)?;
-        // self.release_file(file);
-        // Ok(Arc::new(node))
     }
 
     pub fn page_size(&self) -> u32 {

@@ -1,11 +1,11 @@
 use anyhow::Result;
-use bonsai_db::{Database, Options};
+use bonsai_db::{cursor::Cursor, Database, Options};
 
 fn options() -> Options {
     Options {
         max_files: 10,
         page_size: 1 << 10,
-        cache_size: 1 << 10,
+        cache_size: 1 << 20,
     }
 }
 
@@ -44,6 +44,18 @@ fn run_basic_cursor_reverse_test() -> Result<()> {
         if !cursor.prev_entry()? {
             break;
         }
+    }
+    Ok(())
+}
+
+fn display_cursor(cursor: &mut Cursor<'_>) -> Result<()> {
+    while cursor.is_valid() {
+        println!(
+            "{:?} = {:?}",
+            String::from_utf8_lossy(cursor.key()),
+            String::from_utf8_lossy(cursor.value()),
+        );
+        cursor.next_entry()?;
     }
     Ok(())
 }
@@ -140,25 +152,34 @@ fn run_tx_test() -> Result<()> {
         let value = format!("value_{i}");
         tx.put(key.as_bytes(), value.as_bytes())?;
     }
-    println!("TRAVERSING 1");
-    tx.traverse();
+    // println!("TRAVERSING 1");
+    // tx.traverse();
     tx.commit()?;
-
-    let db = create_test_database()?;
+    let rtx = db.begin_read();
+    // let db = create_test_database()?;
     let mut tx = db.begin_write();
     for i in 100..200 {
         let key = format!("key0000_{i}");
         let value = format!("VALUE_{i}");
         tx.put(key.as_bytes(), value.as_bytes())?;
     }
-    println!("TRAVERSING 2");
-    tx.traverse();
+    // println!("TRAVERSING 2");
+    // let mut cursor = tx.cursor()?;
+    // display_cursor(&mut cursor)?;
     tx.commit()?;
 
-    println!("TRAVERSING 3");
-    let db = create_test_database()?;
-    let mut tx = db.begin_write();
-    tx.traverse();
+    println!("TRAVERSING 1");
+    // let db = create_test_database()?;
+
+    let mut cursor = rtx.cursor()?;
+    display_cursor(&mut cursor)?;
+    // let mut tx = db.begi();
+
+    // println!("TRAVERSING 2");
+    // // let db = create_test_database()?;
+    // let tx = db.begin_read();
+    // let mut cursor = tx.cursor()?;
+    // display_cursor(&mut cursor)?;
 
     Ok(())
 }

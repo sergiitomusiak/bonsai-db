@@ -3,7 +3,7 @@ use crate::node::{
     Address, BranchInternalNode, InternalNodes, LeafInternalNode, Node, NodeHeader, NodeId,
     NodeReader, MIN_KEYS_PER_PAGE,
 };
-use crate::{DatabaseInternal, Writer};
+use crate::{DatabaseInternal, WriteState};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::ops::Not;
@@ -14,15 +14,21 @@ pub type TransactionId = u64;
 pub struct ReadTransaction {
     database: Arc<DatabaseInternal>,
     root_node_id: NodeId,
+    transaction_id: TransactionId,
+}
+
+impl Drop for ReadTransaction {
+    fn drop(&mut self) {
+        self.database.release_reader(self.transaction_id);
+    }
 }
 
 impl ReadTransaction {
-    pub fn new(database: Arc<DatabaseInternal>, root_node_address: Address) -> Self {
-        // let transaction_id = writer.meta().transaction_id + 1;
-        // let root_node_address = writer.meta().root_node;
+    pub fn new(database: Arc<DatabaseInternal>, root_node_address: Address, transaction_id: TransactionId) -> Self {
         Self {
             database,
             root_node_id: NodeId::Address(root_node_address),
+            transaction_id,
         }
     }
 
@@ -61,7 +67,7 @@ pub struct WriteTransaction {
     parent: HashMap<u64, u64>,
     root_node_id: NodeId,
     pending_free_pages: Vec<(Address, NodeHeader)>,
-    writer: Option<Writer>,
+    writer: Option<WriteState>,
     transaction_id: TransactionId,
 }
 
@@ -81,7 +87,7 @@ impl NodeReader for WriteTransaction {
 }
 
 impl WriteTransaction {
-    pub fn new(database: Arc<DatabaseInternal>, writer: Writer) -> Self {
+    pub fn new(database: Arc<DatabaseInternal>, writer: WriteState) -> Self {
         let transaction_id = writer.meta().transaction_id + 1;
         let root_node_address = writer.meta().root_node;
         Self {
@@ -204,6 +210,7 @@ impl WriteTransaction {
     fn write_meta_node(&mut self) -> Result<()> {
         let (free_list_node_address, free_list_header) = self.write_free_list()?;
         let writer = self.writer.as_mut().expect("writer");
+        println!("COMMITTING FREE LIST: {:?}", writer.free_list);
         let mut meta = writer.meta().clone();
         meta.transaction_id = self.transaction_id;
         meta.root_node = self.root_node_id.node_address();
@@ -213,6 +220,7 @@ impl WriteTransaction {
         writer.free_list_header = free_list_header;
         writer.free_list_node_address = free_list_node_address;
         writer.free_list.commit_allocations();
+        println!("COMMITTED FREE LIST: {:?}", writer.free_list);
         Ok(())
     }
 
