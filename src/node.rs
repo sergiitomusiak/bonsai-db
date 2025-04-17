@@ -545,6 +545,7 @@ impl NodeManager {
         file.seek(SeekFrom::Start(page_address))?;
         meta_node.write(&mut file)?;
         file.flush()?;
+        file.sync_all()?;
         self.release_file(file);
         Ok(())
     }

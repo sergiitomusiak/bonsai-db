@@ -159,7 +159,6 @@ impl WriteTransaction {
 
     fn write_meta_node(&mut self) -> Result<()> {
         let (free_list_node_address, free_list_header) = self.write_free_list()?;
-
         let writer = self.writer.as_mut().expect("writer");
         let mut meta = writer.meta().clone();
         meta.transaction_id = self.transaction_id;
@@ -167,13 +166,9 @@ impl WriteTransaction {
         meta.free_list_node = free_list_node_address;
         self.database.node_manager.write_meta(&meta)?;
         *writer.meta_mut() = meta;
-
-        println!("COMMITTING FREE LIST: {:?}", writer.free_list);
         writer.free_list_header = free_list_header;
         writer.free_list_node_address = free_list_node_address;
         writer.free_list.commit_allocations();
-        println!("COMMITTED FREE LIST: {:?}", writer.free_list);
-
         Ok(())
     }
 

@@ -23,8 +23,7 @@ impl FreeList {
         let mut initial_page_address = *self.free.first()?;
 
         for page_address in self.free.difference(&self.pending_allocated) {
-            // assert!(*page_address > 1, "invalid page allocation: {page_address}");
-
+            assert_eq!(page_address % page_size, 0, "invalid page address");
             let restart_initial_page = previous_page_address
                 .map(|previous_page_address| page_address - previous_page_address != page_size)
                 .unwrap_or(false);

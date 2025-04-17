@@ -1,17 +1,21 @@
 use anyhow::Result;
 use bonsai_db::{Database, Options};
 
+fn options() -> Options {
+    Options {
+        max_files: 10,
+        page_size: 1 << 10,
+        cache_size: 1 << 10,
+    }
+}
+
 fn setup_test_for_cursor() -> Result<()> {
     let path = "./my.db";
     let res = std::fs::remove_file(path);
     println!("Remove file: {res:?}");
     let _db = Database::open(
         path,
-        Options {
-            max_files: 10,
-            page_size: 128,
-            cache_size: 1 << 10,
-        },
+        options(),
     )?;
     Ok(())
 }
@@ -19,11 +23,7 @@ fn setup_test_for_cursor() -> Result<()> {
 fn create_test_database() -> Result<Database> {
     Database::open(
         "./my.db",
-        Options {
-            max_files: 10,
-            page_size: 128,
-            cache_size: 1 << 10,
-        },
+        options(),
     )
 }
 
@@ -146,20 +146,22 @@ fn run_tx_test() -> Result<()> {
         let value = format!("value_{i}");
         tx.put(key.as_bytes(), value.as_bytes())?;
     }
-    tx.commit()?;
-
-    let db = create_test_database()?;
-    let mut tx = db.begin_write();
-    for i in 0..30 {
-        let key = format!("key0000_{i}");
-        let value = format!("VALUE_{i}");
-        tx.put(key.as_bytes(), value.as_bytes())?;
-    }
     println!("TRAVERSING 1");
     tx.traverse();
     tx.commit()?;
 
+    let db = create_test_database()?;
+    let mut tx = db.begin_write();
+    for i in 100..200 {
+        let key = format!("key0000_{i}");
+        let value = format!("VALUE_{i}");
+        tx.put(key.as_bytes(), value.as_bytes())?;
+    }
     println!("TRAVERSING 2");
+    tx.traverse();
+    tx.commit()?;
+
+    println!("TRAVERSING 3");
     let db = create_test_database()?;
     let mut tx = db.begin_write();
     tx.traverse();
