@@ -134,10 +134,7 @@ impl FreeList {
             .flat_map(|(_, pages)| pages.iter().copied())
             .collect::<BTreeSet<_>>();
 
-        self.free
-            .union(&pending)
-            .copied()
-            .collect()
+        self.free.union(&pending).copied().collect()
     }
 
     pub fn commit_allocations(&mut self) {
@@ -164,6 +161,8 @@ impl FreeList {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use super::*;
 
     macro_rules! free_list {
@@ -173,11 +172,14 @@ mod tests {
     }
 
     const FREE_LIST_DATA: &[u8] = &[
-        // len
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, // 16
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, // 32
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, // 48
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30,
+        // header
+        0x00, 0x03, // flags
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, // len=3
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // overflow
+        // contents
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, // 16
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, // 32
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, // 48
     ];
 
     #[test]
@@ -233,21 +235,29 @@ mod tests {
         assert!(free_list.free.is_empty());
     }
 
-    // #[test]
-    // fn reads_free_list() {
-    //     let mut reader = Cursor::new(FREE_LIST_DATA);
-    //     let free_list = FreeList::read(&mut reader).unwrap();
-    //     assert_eq!(free_list.free, free_list![16, 32, 48]);
-    //     assert!(free_list.pending.is_empty());
-    //     assert!(free_list.cache.is_empty());
-    // }
+    #[test]
+    fn reads_free_list() {
+        let mut reader = Cursor::new(FREE_LIST_DATA);
+        let (header, free_list) = FreeList::read(&mut reader).unwrap();
+        assert_eq!(
+            header,
+            NodeHeader {
+                flags: FREELIST_NODE,
+                internal_nodes_len: 3,
+                overflow_len: 0
+            }
+        );
+        assert_eq!(free_list.free, free_list![16, 32, 48]);
+        assert!(free_list.pending_free.is_empty());
+        assert!(free_list.cache.is_empty());
+    }
 
-    // #[test]
-    // fn writes_free_list() {
-    //     let mut free_list = FreeList::default();
-    //     free_list.free = free_list![16, 32, 48];
-    //     let mut writer = Cursor::new(Vec::new());
-    //     free_list.write(&mut writer).unwrap();
-    //     assert_eq!(writer.into_inner(), FREE_LIST_DATA);
-    // }
+    #[test]
+    fn writes_free_list() {
+        let mut free_list = FreeList::default();
+        free_list.free = free_list![16, 32, 48];
+        let mut writer = Cursor::new(Vec::new());
+        free_list.write(&mut writer, 128).unwrap();
+        assert_eq!(writer.into_inner(), FREE_LIST_DATA);
+    }
 }

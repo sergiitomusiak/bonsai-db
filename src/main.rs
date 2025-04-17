@@ -13,18 +13,12 @@ fn setup_test_for_cursor() -> Result<()> {
     let path = "./my.db";
     let res = std::fs::remove_file(path);
     println!("Remove file: {res:?}");
-    let _db = Database::open(
-        path,
-        options(),
-    )?;
+    let _db = Database::open(path, options())?;
     Ok(())
 }
 
 fn create_test_database() -> Result<Database> {
-    Database::open(
-        "./my.db",
-        options(),
-    )
+    Database::open("./my.db", options())
 }
 
 fn run_basic_cursor_test() -> Result<()> {
@@ -170,7 +164,7 @@ fn run_tx_test() -> Result<()> {
 }
 
 fn main() {
-    setup_test_for_cursor().expect("setup test for cursor");
+    // setup_test_for_cursor().expect("setup test for cursor");
     // run_basic_cursor_test().expect("basic cursor test");
     // run_basic_cursor_reverse_test().expect("basic cursor reverse test");
     // run_cursor_seek().expect("cursor seek");

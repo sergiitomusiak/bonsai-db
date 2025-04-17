@@ -11,6 +11,49 @@ use std::sync::Arc;
 
 pub type TransactionId = u64;
 
+pub struct ReadTransaction {
+    database: Arc<DatabaseInternal>,
+    root_node_id: NodeId,
+}
+
+impl ReadTransaction {
+    pub fn new(database: Arc<DatabaseInternal>, root_node_address: Address) -> Self {
+        // let transaction_id = writer.meta().transaction_id + 1;
+        // let root_node_address = writer.meta().root_node;
+        Self {
+            database,
+            root_node_id: NodeId::Address(root_node_address),
+        }
+    }
+
+    pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let mut cursor = Cursor::new(self.root_node_id, self)?;
+        cursor.seek(key)?;
+        if !cursor.is_valid() || cursor.key() != key {
+            return Ok(None);
+        }
+        Ok(Some(cursor.value().to_vec()))
+    }
+
+    pub fn cursor(&self) -> Result<Cursor<'_>> {
+        Cursor::new(self.root_node_id, self)
+    }
+}
+
+impl NodeReader for ReadTransaction {
+    fn read_node(&self, node_id: NodeId) -> Result<Node<'_>> {
+        let node = match node_id {
+            NodeId::Address(address) => {
+                Node::ReadOnly(self.database.node_manager.read_node(address)?)
+            }
+            NodeId::Id(_) => {
+                panic!("fetching dirty node in read tx")
+            }
+        };
+        Ok(node)
+    }
+}
+
 pub struct WriteTransaction {
     database: Arc<DatabaseInternal>,
     next_node_id: u64,
@@ -97,6 +140,7 @@ impl WriteTransaction {
         let root_node_address = self.traverse_write(node_id)?;
         self.root_node_id = NodeId::Address(root_node_address);
         self.write_meta_node()?;
+        // self.database.node_manager.inv
         Ok(())
     }
 

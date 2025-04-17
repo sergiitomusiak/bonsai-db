@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::hash::Hasher;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -101,7 +102,7 @@ impl LeafInternalNode {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeHeader {
     pub flags: u16,
     pub internal_nodes_len: u64,
@@ -499,7 +500,7 @@ pub struct NodeManager {
     files: Mutex<Files>,
     files_condvar: Condvar,
     page_size: u32,
-    // nodes_cache: moka::sync::Cache<Address, Arc<InternalNodes>>,
+    nodes_cache: moka::sync::Cache<Address, Arc<(NodeHeader, InternalNodes)>>,
 }
 
 impl NodeManager {
@@ -507,6 +508,7 @@ impl NodeManager {
         file_path: impl AsRef<Path>,
         max_files: usize,
         page_size: u32,
+        cache_size: u64,
         // initial_alignment: u64,
     ) -> Self {
         Self {
@@ -516,10 +518,10 @@ impl NodeManager {
             files_condvar: Condvar::new(),
             page_size,
             // initial_alignment,
-            // nodes_cache: moka::sync::Cache::builder()
-            //     .weigher(|_, node: &Arc<InternalNodes>| node.size())
-            //     .max_capacity(cache_size as u64)
-            //     .build(),
+            nodes_cache: moka::sync::Cache::builder()
+                .weigher(|_, node: &Arc<(NodeHeader, InternalNodes)>| node.as_ref().1.size() as u32)
+                .max_capacity(cache_size)
+                .build(),
         }
     }
 
@@ -531,7 +533,11 @@ impl NodeManager {
         Ok(())
     }
 
-    pub fn write_free_list(&self, page_address: Address, free_list: &FreeList) -> Result<NodeHeader> {
+    pub fn write_free_list(
+        &self,
+        page_address: Address,
+        free_list: &FreeList,
+    ) -> Result<NodeHeader> {
         let mut file = self.get_file()?;
         file.seek(SeekFrom::Start(page_address))?;
         let node_header = free_list.write(&mut file, self.page_size)?;
@@ -546,16 +552,28 @@ impl NodeManager {
         meta_node.write(&mut file)?;
         file.flush()?;
         file.sync_all()?;
+
+        // TODO: invalidate cache?
+
         self.release_file(file);
         Ok(())
     }
 
+    pub fn invalidate_cache(&self, page_addresses: BTreeSet<Address>) {
+        todo!()
+    }
+
     pub fn read_node(&self, page_address: Address) -> Result<Arc<(NodeHeader, InternalNodes)>> {
-        let mut file = self.get_file()?;
-        file.seek(SeekFrom::Start(page_address))?;
-        let node = InternalNodes::read(&mut file)?;
-        self.release_file(file);
-        Ok(Arc::new(node))
+        self.nodes_cache
+            .try_get_with(page_address, || self.read_node_from_file(page_address))
+            .map_err(|e| anyhow!("{e:?}"))
+
+        //self.nodes_cache.get_with(page_address, || self.read_node_from_file(page_address))
+        // let mut file = self.get_file()?;
+        // file.seek(SeekFrom::Start(page_address))?;
+        // let node = InternalNodes::read(&mut file)?;
+        // self.release_file(file);
+        // Ok(Arc::new(node))
     }
 
     pub fn page_size(&self) -> u32 {
@@ -597,6 +615,14 @@ impl NodeManager {
         files.files.push(file);
         self.files_condvar.notify_one();
     }
+
+    fn read_node_from_file(&self, page_address: Address) -> Result<Arc<(NodeHeader, InternalNodes)>> {
+        let mut file = self.get_file()?;
+        file.seek(SeekFrom::Start(page_address))?;
+        let node = InternalNodes::read(&mut file)?;
+        self.release_file(file);
+        Ok(Arc::new(node))
+    }
 }
 
 #[cfg(test)]
@@ -608,16 +634,17 @@ mod tests {
     #[test]
     fn reads_branch_node() {
         let data = &[
-            // flags
-            0x00, 0x01, // internal nodes len
-            0x00, 0x02, // overflow len
-            0x00, 0x00, // page id
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, // key len
-            0x00, 0x0A, // key
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, // page id
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, // key len
-            0x00, 0x09, // key
-            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19,
+            // header
+            0x00, 0x01, // flags
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, // internal nodes len
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // overflow len
+            // node content
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, // node address
+            0x00, 0x0A, // key len
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, // key
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, // node address
+            0x00, 0x09, // key len
+            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, // key
         ];
 
         let mut cursor = Cursor::new(data);
@@ -647,21 +674,21 @@ mod tests {
     #[test]
     fn reads_leaf_node() {
         let data = &[
-            // flags
-            0x00, 0x02, // internal nodes len
-            0x00, 0x02, // overflow len
-            0x00, 0x00, // node 1
-            // key len
-            0x00, 0x0A, // key
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, // value len
-            0x00, 0x00, 0x00, 0x10, // value
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
-            0x0F, 0x10, // node 2
-            // key len
-            0x00, 0x09, // key
-            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, // value len
-            0x00, 0x00, 0x00, 0x02, // value
-            0x11, 0x12,
+            // header
+            0x00, 0x02, // flags
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, // internal nodes len
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // overflow len
+            // node 1
+            0x00, 0x0A, // key len
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, // key
+            0x00, 0x00, 0x00, 0x10, // value len
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // value
+            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+            // node 2
+            0x00, 0x09, // key len
+            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, // key
+            0x00, 0x00, 0x00, 0x02, // value len
+            0x11, 0x12, // value
         ];
 
         let mut cursor = Cursor::new(data);

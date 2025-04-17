@@ -11,7 +11,10 @@ use node::{Address, InternalNodes, MetaNode, NodeHeader, NodeManager};
 use std::{
     io::{Seek, Write},
     path::Path,
-    sync::{Arc, Condvar, Mutex},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use tx::WriteTransaction;
 
@@ -82,8 +85,6 @@ impl Database {
 
         let free_list_address = initial_alignment;
         let root_node_address = initial_alignment + options.page_size as u64;
-
-        // write meta nodes
         let meta_nodes = [
             MetaNode {
                 page_size: options.page_size,
@@ -99,9 +100,7 @@ impl Database {
             },
         ];
         for (i, meta_node) in meta_nodes.iter().enumerate() {
-            file.seek(std::io::SeekFrom::Start(
-                i as u64 * MetaNode::page_size(),
-            ))?;
+            file.seek(std::io::SeekFrom::Start(i as u64 * MetaNode::page_size()))?;
             meta_node.write(&mut file)?;
         }
 
@@ -122,7 +121,7 @@ impl Database {
                 file_path,
                 options.max_files as usize,
                 options.page_size,
-                //initial_alignment,
+                options.cache_size,
             ),
             writer: Mutex::new(Some(Writer {
                 free_list,
@@ -132,25 +131,19 @@ impl Database {
             })),
             writer_cond_var: Condvar::new(),
             page_size: options.page_size,
+            root_node: AtomicU64::new(root_node_address),
         })
     }
 
     fn read_state(file_path: impl AsRef<Path>, options: &Options) -> Result<DatabaseInternal> {
-        // read meta nodes
-        // validate and pick valid node with highest transaction id
         let mut file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(false)
             .open(file_path.as_ref())?;
 
-        // let meta_nodes = [MetaNode; 2];
-        // read first meta page to determine page size
-        // let mut page_reader = LimitedReader::new(&mut file, 0, MetaNode::size())?;
         file.seek(std::io::SeekFrom::Start(0))?;
         let meta_node0 = MetaNode::read(&mut file);
-
-        // let mut page_reader = LimitedReader::new(&mut file, MetaNode::page_size() as u64, MetaNode::size())?;
         file.seek(std::io::SeekFrom::Start(MetaNode::page_size()))?;
         let meta_node1 = MetaNode::read(&mut file);
 
@@ -175,20 +168,15 @@ impl Database {
             ));
         }
 
-        // let initial_alignment = meta_node.page_size as u64
-        //     * ((MetaNode::page_size() * 2 + meta_node.page_size as u64 - 1)
-        //         / (meta_node.page_size as u64));
-
-        // read free list
         file.seek(std::io::SeekFrom::Start(meta_node.free_list_node))?;
         let (free_list_header, free_list) = FreeList::read(&mut file)?;
-
+        let root_node_address = meta_node.root_node;
         Ok(DatabaseInternal {
             node_manager: NodeManager::new(
                 file_path,
                 options.max_files as usize,
                 meta_node.page_size,
-                // initial_alignment,
+                options.cache_size,
             ),
             page_size: meta_node.page_size,
             writer: Mutex::new(Some(Writer {
@@ -198,6 +186,7 @@ impl Database {
                 meta_nodes: [meta_node.clone(), meta_node],
             })),
             writer_cond_var: Condvar::new(),
+            root_node: AtomicU64::new(root_node_address),
         })
     }
 }
@@ -233,6 +222,7 @@ pub struct DatabaseInternal {
     pub writer: Mutex<Option<Writer>>,
     pub writer_cond_var: Condvar,
     pub page_size: u32,
+    pub root_node: std::sync::atomic::AtomicU64,
 }
 
 impl DatabaseInternal {
@@ -257,9 +247,11 @@ impl DatabaseInternal {
     }
 
     pub fn release_writer(&self, writer: Writer) {
+        let root_node = writer.meta().root_node;
         let mut writer_lock = self.writer.lock().expect("files lock");
         assert!(writer_lock.is_none(), "there must be only one writer token");
         *writer_lock = Some(writer);
         self.writer_cond_var.notify_one();
+        self.root_node.store(root_node, Ordering::Release);
     }
 }
