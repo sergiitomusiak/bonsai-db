@@ -1,0 +1,12 @@
+- Performance tests (vs other DBs?)
+- Replace error type
+- Handle WouldBlock IO error
+- Key, Value slices type (maybe use Bytes?), Key limits
+- Range iterator, reverse iterator?
+- Invalidate cache when a node is released √
+- Remove cache from FreeList?
+- Create buckets?
+- Compaction API?
+- Test coverage
+- Node checksum?
+- Revisit panics

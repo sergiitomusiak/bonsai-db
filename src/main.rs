@@ -4,7 +4,7 @@ use bonsai_db::{cursor::Cursor, Database, Options};
 fn options() -> Options {
     Options {
         max_files: 10,
-        page_size: 1 << 10,
+        page_size: 1 << 12,
         cache_size: 1 << 20,
     }
 }
@@ -148,31 +148,57 @@ fn run_tx_test() -> Result<()> {
     let db = create_test_database()?;
     let mut tx = db.begin_write();
     for i in 0..100 {
-        let key = format!("key0000_{i}");
+        let key = format!("KEY_{i}");
         let value = format!("value_{i}");
         tx.put(key.as_bytes(), value.as_bytes())?;
     }
-    // println!("TRAVERSING 1");
     // tx.traverse();
     tx.commit()?;
-    let rtx = db.begin_read();
+
+    let db2 = db.clone();
+    std::thread::spawn(move || {
+        let rtx = db2.begin_read();
+        for _ in 0..10 {
+            // println!("ReadOnly Cursor");
+            let mut cursor = rtx.cursor().unwrap();
+            display_cursor(&mut cursor).unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        drop(rtx);
+    });
+
     // let db = create_test_database()?;
-    let mut tx = db.begin_write();
-    for i in 100..200 {
-        let key = format!("key0000_{i}");
-        let value = format!("VALUE_{i}");
-        tx.put(key.as_bytes(), value.as_bytes())?;
+    for t in 0..10 {
+        let mut tx = db.begin_write();
+        for i in 100..200 {
+            let key = format!("KEY_{i}");
+            let value = format!("VALUE_{}", t*i);
+            tx.put(key.as_bytes(), value.as_bytes())?;
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            // println!("Written value");
+
+            if i % 50 == 0 {
+                tx.commit()?;
+                tx = db.begin_write();
+            }
+        }
     }
+
+    let tx = db.begin_write();
+    tx.commit()?;
+
+    // let rtx = db.begin_read();
+    // let mut cursor = rtx.cursor().unwrap();
+    // display_cursor(&mut cursor).unwrap();
     // println!("TRAVERSING 2");
     // let mut cursor = tx.cursor()?;
     // display_cursor(&mut cursor)?;
-    tx.commit()?;
 
-    println!("TRAVERSING 1");
+    // println!("TRAVERSING 1");
     // let db = create_test_database()?;
 
-    let mut cursor = rtx.cursor()?;
-    display_cursor(&mut cursor)?;
+    // let mut cursor = rtx.cursor()?;
+    // display_cursor(&mut cursor)?;
     // let mut tx = db.begi();
 
     // println!("TRAVERSING 2");

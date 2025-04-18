@@ -32,9 +32,11 @@ impl FreeList {
                 initial_page_address = *page_address;
             }
 
-            if (page_address - initial_page_address) / page_size + 1 == required_pages as Address {
+            if ((page_address - initial_page_address) / page_size) + 1 == required_pages as Address {
                 // Remove found pages from free list
+                println!("ALLOCATED PAGES: {required_pages:?}");
                 for i in 0..required_pages {
+                    self.cache.remove(&(initial_page_address + i * page_size));
                     self.free.remove(&(initial_page_address + i * page_size));
                     self.pending_allocated
                         .insert(initial_page_address + i * page_size);
@@ -43,7 +45,7 @@ impl FreeList {
             }
             previous_page_address = Some(*page_address);
         }
-
+        println!("NO {required_pages:?} PAGES IN FREE LIST");
         None
     }
 
@@ -90,6 +92,7 @@ impl FreeList {
         let pending = self.pending_free.entry(transaction_id).or_default();
         let page_end_addess = page_start_address + (page_overflow + 1) * page_size;
         let mut page_address = page_start_address;
+        println!("FREEING PAGE WITH OVERFLOW: {page_overflow:?}");
         while page_address < page_end_addess {
             let inserted = self.cache.insert(page_address);
             assert!(inserted, "page {page_address} is already free");
@@ -98,22 +101,25 @@ impl FreeList {
         }
     }
 
-    pub fn release(&mut self, transaction_id: TransactionId) {
+    pub fn release(&mut self, transaction_id: TransactionId) -> Vec<Address> {
         let txs = self
             .pending_free
             .range(..=transaction_id)
             .map(|(tx_id, _)| *tx_id)
             .collect::<Vec<_>>();
 
-        println!("RELEASING: {:?}", txs);
+        let mut freed: Vec<Address> = Vec::new();
         for tx_id in txs {
             let pages = self
                 .pending_free
                 .remove(&tx_id)
                 .expect("pending transactions");
 
+            freed.extend(&pages);
             self.free.extend(pages);
         }
+        println!("RELEASING PAGES COUNT: {:?}", freed.len());
+        freed
     }
 
     pub fn size(&self) -> usize {
@@ -126,6 +132,43 @@ impl FreeList {
 
     pub fn pending_pages_len(&self) -> usize {
         self.pending_free.values().map(|pages| pages.len()).sum()
+    }
+
+    pub fn summary(&self) -> String {
+        format!(
+            "free={}, pending_free={}, pending_allocations={}, free_summary=[{}]",
+            self.free.len(),
+            self.pending_free.len(),
+            self.pending_allocated.len(),
+            self.free_summary().unwrap_or(String::new()),
+        )
+    }
+
+    pub fn free_summary(&self) -> Option<String> {
+        let page_size = 1 << 12;
+        let mut previous_page_address: Option<Address> = None;
+        let mut initial_page_address = *self.free.first()?;
+
+        let mut res = String::new();
+        for page_address in self.free.difference(&self.pending_allocated) {
+            assert_eq!(page_address % page_size, 0, "invalid page address");
+            let restart_initial_page = previous_page_address
+                .map(|previous_page_address| page_address - previous_page_address != page_size)
+                .unwrap_or(false);
+
+            if restart_initial_page {
+                let item = format!("({:?}-{:?},len={:?},gap={:?}),",
+                    initial_page_address, previous_page_address.unwrap(),
+                    (previous_page_address.unwrap()-initial_page_address),
+                    (page_address-previous_page_address.unwrap()),
+                );
+                res.push_str(&item);
+                initial_page_address = *page_address;
+            }
+
+            previous_page_address = Some(*page_address);
+        }
+        Some(res)
     }
 
     fn copy_all(&self) -> Vec<u64> {

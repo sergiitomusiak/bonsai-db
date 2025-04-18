@@ -559,6 +559,12 @@ impl NodeManager {
             .map_err(|e| anyhow!("{e:?}"))
     }
 
+    pub fn invalidate_nodes_cache(&self, pages: Vec<Address>) {
+        for page_address in pages {
+            self.nodes_cache.invalidate(&page_address);
+        }
+    }
+
     pub fn page_size(&self) -> u32 {
         self.page_size
     }
