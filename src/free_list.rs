@@ -5,7 +5,7 @@ use crate::{
 };
 
 use anyhow::Result;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::mem::size_of;
 
@@ -14,7 +14,6 @@ pub struct FreeList {
     pub free: BTreeSet<Address>,
     pub pending_allocated: BTreeSet<Address>,
     pub pending_free: BTreeMap<TransactionId, BTreeSet<Address>>,
-    pub cache: HashSet<Address>,
 }
 
 impl FreeList {
@@ -36,7 +35,6 @@ impl FreeList {
                 // Remove found pages from free list
                 println!("ALLOCATED PAGES: {required_pages:?}");
                 for i in 0..required_pages {
-                    self.cache.remove(&(initial_page_address + i * page_size));
                     self.free.remove(&(initial_page_address + i * page_size));
                     self.pending_allocated
                         .insert(initial_page_address + i * page_size);
@@ -57,7 +55,6 @@ impl FreeList {
             free,
             pending_allocated: BTreeSet::new(),
             pending_free: BTreeMap::new(),
-            cache: HashSet::new(),
         };
         println!("FREE LIST: {node:?}");
         Ok((header, node))
@@ -94,8 +91,6 @@ impl FreeList {
         let mut page_address = page_start_address;
         println!("FREEING PAGE WITH OVERFLOW: {page_overflow:?}");
         while page_address < page_end_addess {
-            let inserted = self.cache.insert(page_address);
-            assert!(inserted, "page {page_address} is already free");
             pending.insert(page_address);
             page_address += page_size;
         }
@@ -186,20 +181,11 @@ impl FreeList {
     }
 
     pub fn rollback(&mut self, transaction_id: TransactionId) {
-        let Some(pages) = self.pending_free.remove(&transaction_id) else {
+        let Some(_) = self.pending_free.remove(&transaction_id) else {
             return;
         };
-
-        for page in pages {
-            self.cache.remove(&page);
-        }
-
         self.free.extend(self.pending_allocated.iter());
         self.pending_allocated.clear();
-    }
-
-    pub fn is_page_freed(&self, page_address: Address) -> bool {
-        self.cache.contains(&page_address)
     }
 }
 
@@ -293,7 +279,6 @@ mod tests {
         );
         assert_eq!(free_list.free, free_list![16, 32, 48]);
         assert!(free_list.pending_free.is_empty());
-        assert!(free_list.cache.is_empty());
     }
 
     #[test]

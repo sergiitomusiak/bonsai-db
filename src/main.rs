@@ -149,7 +149,7 @@ fn run_tx_test() -> Result<()> {
     let mut tx = db.begin_write();
     for i in 0..100 {
         let key = format!("KEY_{i}");
-        let value = format!("value_{i}");
+        let value = format!("value_{:0>50?}", i);
         tx.put(key.as_bytes(), value.as_bytes())?;
     }
     // tx.traverse();
@@ -172,7 +172,7 @@ fn run_tx_test() -> Result<()> {
         let mut tx = db.begin_write();
         for i in 100..200 {
             let key = format!("KEY_{i}");
-            let value = format!("VALUE_{}", t*i);
+            let value = format!("VALUE_{:0>50?}", t*i);
             tx.put(key.as_bytes(), value.as_bytes())?;
             std::thread::sleep(std::time::Duration::from_millis(1));
             // println!("Written value");
