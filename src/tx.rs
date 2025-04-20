@@ -231,13 +231,15 @@ impl WriteTransaction {
     fn allocate(&mut self, required_size: u64) -> Result<Address> {
         let page_size = self.database.page_size as u64;
         let required_pages = required_size.div_ceil(page_size);
-        let page_address = self
+        let writer = self
             .writer
             .as_mut()
-            .expect("tx writer")
+            .expect("tx writer");
+        let page_address = writer
             .free_list
             .allocate(required_pages, page_size);
         if let Some(page_address) = page_address {
+            writer.free_list.register_allocation(page_address, self.transaction_id);
             return Ok(page_address);
         }
         let file_size = self.database.node_manager.size()?;
@@ -247,6 +249,7 @@ impl WriteTransaction {
         } else {
             file_size
         };
+        writer.free_list.register_allocation(page_address, self.transaction_id);
         Ok(page_address)
     }
 

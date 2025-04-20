@@ -234,8 +234,14 @@ impl DatabaseInternal {
                     .map(|(transaction_id, _)| *transaction_id)
                     .unwrap_or(TransactionId::MAX);
 
+                let max_transaction_id = read_state_lock
+                .transactions
+                .last_key_value()
+                .map(|(transaction_id, _)| *transaction_id)
+                .unwrap_or(0);
+
                 if min_transaction_id > 0 {
-                    let freed = write_state.free_list.release(min_transaction_id-1);
+                    let freed = write_state.free_list.release(min_transaction_id, max_transaction_id);
                     self.node_manager.invalidate_nodes_cache(freed);
                 }
 

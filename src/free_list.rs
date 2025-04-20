@@ -5,13 +5,14 @@ use crate::{
 };
 
 use anyhow::Result;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Read, Write};
 use std::mem::size_of;
 
 #[derive(Debug, Default)]
 pub struct FreeList {
     pub free: BTreeSet<Address>,
+    pub allocated_by: HashMap<Address, TransactionId>,
     pub pending_allocated: BTreeSet<Address>,
     pub pending_free: BTreeMap<TransactionId, BTreeSet<Address>>,
 }
@@ -47,12 +48,18 @@ impl FreeList {
         None
     }
 
+    pub fn register_allocation(&mut self, page_address: Address, transaction_id: TransactionId) {
+        let replaced = self.allocated_by.insert(page_address, transaction_id).is_some();
+        assert!(!replaced, "page address already registered");
+    }
+
     pub fn read<R: Read>(reader: &mut R) -> Result<(NodeHeader, Self)> {
         let header = NodeHeader::read(reader)?;
         let free = read_vec_u64(reader, header.internal_nodes_len as usize)?;
         let free = BTreeSet::from_iter(free);
         let node = Self {
             free,
+            allocated_by: HashMap::new(),
             pending_allocated: BTreeSet::new(),
             pending_free: BTreeMap::new(),
         };
@@ -96,13 +103,14 @@ impl FreeList {
         }
     }
 
-    pub fn release(&mut self, transaction_id: TransactionId) -> Vec<Address> {
+    pub fn release(&mut self, min_tx: TransactionId, max_tx: TransactionId) -> Vec<Address> {
         let txs = self
             .pending_free
-            .range(..=transaction_id)
+            .range(..=min_tx)
             .map(|(tx_id, _)| *tx_id)
             .collect::<Vec<_>>();
 
+        // Release pages freed in earliest snapshot
         let mut freed: Vec<Address> = Vec::new();
         for tx_id in txs {
             let pages = self
@@ -113,7 +121,30 @@ impl FreeList {
             freed.extend(&pages);
             self.free.extend(pages);
         }
+
+        // Release pages freed by write transactions
+        // that were allocated after latest snapshot
+        for (_, pages) in self.pending_free.iter_mut() {
+            pages.retain(|page_address| {
+                let allocated_by = self
+                    .allocated_by
+                    .get(page_address)
+                    .unwrap_or(&0);
+
+                let remove = *allocated_by > max_tx;
+                if remove {
+                    freed.push(*page_address);
+                }
+                !remove
+            });
+        }
+
+        self.pending_free.retain(|_, pages| !pages.is_empty());
         println!("RELEASING PAGES COUNT: {:?}", freed.len());
+
+        for page in freed.iter() {
+            self.allocated_by.remove(page);
+        }
         freed
     }
 
@@ -185,6 +216,10 @@ impl FreeList {
             return;
         };
         self.free.extend(self.pending_allocated.iter());
+        for allocated in self.pending_allocated.iter() {
+            let removed = self.allocated_by.remove(allocated).is_some();
+            assert!(removed, "allocated page was not registered");
+        }
         self.pending_allocated.clear();
     }
 }

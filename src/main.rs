@@ -49,14 +49,19 @@ fn run_basic_cursor_reverse_test() -> Result<()> {
 }
 
 fn display_cursor(cursor: &mut Cursor<'_>) -> Result<()> {
+    let mut len = 0;
     while cursor.is_valid() {
-        println!(
-            "{:?} = {:?}",
-            String::from_utf8_lossy(cursor.key()),
-            String::from_utf8_lossy(cursor.value()),
-        );
+        let key_len = String::from_utf8_lossy(cursor.key()).len();
+        let val_len = String::from_utf8_lossy(cursor.value()).len();
+        len += key_len + val_len;
+        // println!(
+        //     "{:?} = {:?}",
+        //     String::from_utf8_lossy(cursor.key()),
+        //     String::from_utf8_lossy(cursor.value()),
+        // );
         cursor.next_entry()?;
     }
+    println!("READ TOTAL LEN: {:?}", len);
     Ok(())
 }
 
@@ -157,25 +162,32 @@ fn run_tx_test() -> Result<()> {
 
     let db2 = db.clone();
     std::thread::spawn(move || {
-        let rtx = db2.begin_read();
-        for _ in 0..10 {
+        let mut txs = Vec::new();
+        for _ in 0..100 {
+            let rtx = db2.begin_read();
             // println!("ReadOnly Cursor");
             let mut cursor = rtx.cursor().unwrap();
             display_cursor(&mut cursor).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            txs.push(rtx);
         }
-        std::thread::sleep(std::time::Duration::from_millis(1));
-        drop(rtx);
     });
 
     // let db = create_test_database()?;
     for t in 0..10 {
         let mut tx = db.begin_write();
         for i in 100..200 {
-            let key = format!("KEY_{i}");
-            let value = format!("VALUE_{:0>50?}", t*i);
-            tx.put(key.as_bytes(), value.as_bytes())?;
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            // println!("Written value");
+
+            if t % 2 == 0 {
+                let key = format!("KEY_{i}");
+                let value = format!("VALUE_{:0>50?}", t*i);
+                tx.put(key.as_bytes(), value.as_bytes())?;
+            } else {
+                let key = format!("KEY_{i}");
+                tx.remove(key.as_bytes())?;
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(10));
 
             if i % 50 == 0 {
                 tx.commit()?;
