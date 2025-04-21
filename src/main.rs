@@ -5,7 +5,7 @@ fn options() -> Options {
     Options {
         max_files: 10,
         page_size: 1 << 12,
-        cache_size: 1 << 20,
+        cache_size: 1 << 30,
     }
 }
 
@@ -177,7 +177,6 @@ fn run_tx_test() -> Result<()> {
     for t in 0..10 {
         let mut tx = db.begin_write();
         for i in 100..200 {
-
             if t % 2 == 0 {
                 let key = format!("KEY_{i}");
                 let value = format!("VALUE_{:0>50?}", t*i);
@@ -222,12 +221,63 @@ fn run_tx_test() -> Result<()> {
     Ok(())
 }
 
+fn run_large() -> Result<()> {
+    let db = create_test_database()?;
+    let mut tx = db.begin_write();
+    for i in 0..10_000_000 {
+        let key = format!("KEY_{:0>50?}", i);
+        let value = format!("value_{:0>50?}", i);
+        tx.put(key.as_bytes(), value.as_bytes())?;
+
+        if i % 100_000 == 0 {
+            // tx.traverse();
+            tx.commit()?;
+            tx = db.begin_write();
+        }
+
+        if i % 100_000 == 0 {
+            println!("<<<====COMMIT==== {i}");
+        }
+    }
+    // tx.traverse();
+    tx.commit()?;
+    Ok(())
+}
+
+fn eval_large() -> Result<()> {
+    let db = create_test_database()?;
+    let rtx = db.begin_read();
+    // println!("ReadOnly Cursor");
+    let mut cursor = rtx.cursor().unwrap();
+    for i in 0..10_000_000 {
+        if !cursor.is_valid() {
+            return Err(anyhow::anyhow!("invalid cursor"));
+        }
+
+        let key = format!("KEY_{:0>50?}", i);
+        let value = format!("value_{:0>50?}", i);
+
+        assert_eq!(cursor.key(), key.as_bytes(), "keys at {i} are not equal");
+        assert_eq!(cursor.value(), value.as_bytes(), "values at {i} are not equal");
+
+        if i % 100_000 == 0 {
+            println!("CHECKS {i}");
+        }
+
+        cursor.next_entry()?;
+    }
+
+    Ok(())
+}
+
 fn main() {
     // setup_test_for_cursor().expect("setup test for cursor");
     // run_basic_cursor_test().expect("basic cursor test");
     // run_basic_cursor_reverse_test().expect("basic cursor reverse test");
     // run_cursor_seek().expect("cursor seek");
     // run_basic_cursor_test().expect("cursor test 1");
-    run_tx_test().expect("run tx");
+    // run_tx_test().expect("run tx");
     // run_basic_cursor_test().expect("cursor test 1");
+    run_large().expect("run large");
+    // eval_large().expect("eval large");
 }

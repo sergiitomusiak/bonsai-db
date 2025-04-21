@@ -81,7 +81,9 @@ impl LeafInternalNode {
         // read key
         let key_len = read_u16(reader)? as usize;
         let mut key = vec![0; key_len];
-        reader.read_exact(&mut key)?;
+        if let Err(e) = reader.read_exact(&mut key) {
+            panic!("fuck {e:?}");
+        }
 
         // read value
         let val_len = read_u32(reader)? as usize;
@@ -374,6 +376,41 @@ impl InternalNodes {
         Err(anyhow!("invalid node type {}", header.flags))
     }
 
+    pub fn read2<R: Read>(reader: &mut R, page_size: u64) -> Result<(NodeHeader, Self)> {
+        let mut buf = vec![0; page_size as usize];
+        reader.read_exact(&mut buf)?;
+
+        let mut c = std::io::Cursor::new(buf);
+        let header = NodeHeader::read(&mut c)?;
+
+        if header.overflow_len > 0 {
+            // read overflow pages
+            let pos = c.position();
+            let mut buf = c.into_inner();
+            let new_len = buf.len() + (header.overflow_len * page_size) as usize;
+            buf.resize(new_len, 0);
+            reader.read_exact(&mut buf[page_size as usize..])?;
+            c = std::io::Cursor::new(buf);
+            c.set_position(pos);
+        }
+
+        if header.flags == BRANCH_NODE {
+            let mut nodes = Vec::new();
+            for _ in 0..header.internal_nodes_len {
+                nodes.push(BranchInternalNode::read(&mut c)?);
+            }
+            return Ok((header, Self::Branch(nodes)));
+        }
+        if header.flags == LEAF_NODE {
+            let mut nodes = Vec::new();
+            for _ in 0..header.internal_nodes_len {
+                nodes.push(LeafInternalNode::read(&mut c)?);
+            }
+            return Ok((header, Self::Leaf(nodes)));
+        }
+        Err(anyhow!("invalid node type {}", header.flags))
+    }
+
     pub fn write<W: Write>(&self, writer: &mut W, page_size: u64) -> Result<NodeHeader> {
         let node_header = self.write_header(writer, page_size)?;
         match self {
@@ -390,6 +427,41 @@ impl InternalNodes {
         }
         Ok(node_header)
     }
+
+    pub fn write2<W: Write>(&self, writer: &mut W, page_size: u64) -> Result<NodeHeader> {
+        let buf = vec![0; page_size as usize];
+        let mut c = std::io::Cursor::new(buf);
+        let header = self.write_header(&mut c, page_size)?;
+
+        if header.overflow_len > 0 {
+            // read overflow pages
+            let pos = c.position();
+            let mut buf = c.into_inner();
+            let new_len = buf.len() + (header.overflow_len * page_size) as usize;
+            buf.resize(new_len, 0);
+            c = std::io::Cursor::new(buf);
+            c.set_position(pos);
+        }
+
+        match self {
+            Self::Branch(nodes) => {
+                for node in nodes {
+                    node.write(&mut c)?;
+                }
+            }
+            Self::Leaf(nodes) => {
+                for node in nodes {
+                    node.write(&mut c)?;
+                }
+            }
+        }
+
+        let buf = c.into_inner();
+        writer.write_all(&buf)?;
+
+        Ok(header)
+    }
+
 
     fn write_header<W: Write>(&self, writer: &mut W, page_size: u64) -> Result<NodeHeader> {
         let (nodes_len, nodes_size, flags) = match self {
@@ -409,7 +481,7 @@ impl InternalNodes {
         let overflow_len: u64 = if data_size <= page_size {
             0
         } else {
-            (data_size - page_size) / page_size
+            (data_size - page_size).div_ceil(page_size)
         };
 
         let node_header = NodeHeader {
@@ -525,7 +597,7 @@ impl NodeManager {
     pub fn write_node(&self, page_address: Address, node: &InternalNodes) -> Result<()> {
         let mut file = self.get_file()?;
         file.seek(SeekFrom::Start(page_address))?;
-        node.write(&mut file, self.page_size as u64)?;
+        node.write2(&mut file, self.page_size as u64)?;
         self.release_file(file);
         Ok(())
     }
@@ -548,7 +620,7 @@ impl NodeManager {
         file.seek(SeekFrom::Start(page_address))?;
         meta_node.write(&mut file)?;
         file.flush()?;
-        file.sync_all()?;
+        // file.sync_data()?;
         self.release_file(file);
         Ok(())
     }
@@ -574,6 +646,13 @@ impl NodeManager {
         let len = file.metadata()?.len();
         self.release_file(file);
         Ok(len)
+    }
+
+    pub fn set_size(&self, size: u64) -> Result<()> {
+        let file = self.get_file()?;
+        file.set_len(size)?;
+        self.release_file(file);
+        Ok(())
     }
 
     fn get_file(&self) -> Result<File> {
@@ -608,7 +687,8 @@ impl NodeManager {
     fn read_node_from_file(&self, page_address: Address) -> Result<Arc<(NodeHeader, InternalNodes)>> {
         let mut file = self.get_file()?;
         file.seek(SeekFrom::Start(page_address))?;
-        let node = InternalNodes::read(&mut file)?;
+        let node = InternalNodes::read2(&mut file, self.page_size as u64)?;
+        // let node = InternalNodes::read(&mut file)?;
         self.release_file(file);
         Ok(Arc::new(node))
     }

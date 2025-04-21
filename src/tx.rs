@@ -173,10 +173,11 @@ impl WriteTransaction {
                 );
             }
 
-            writer.free_list.size()
+            writer.free_list.size() as u64 + NodeHeader::size()
         };
 
-        let page_address = self.allocate(free_list_size as u64)?;
+        let page_address = self.allocate(free_list_size)?;
+        // println!("FREE LIST SIZE FOR ALLOCATION: {free_list_size:?}, ADDRESS: {page_address:?}");
         let writer = self.writer.as_ref().expect("writer");
         let node_header = self
             .database
@@ -210,7 +211,7 @@ impl WriteTransaction {
     fn write_meta_node(&mut self) -> Result<()> {
         let (free_list_node_address, free_list_header) = self.write_free_list()?;
         let writer = self.writer.as_mut().expect("writer");
-        println!("COMMITTING FREE LIST: {:?}", writer.free_list.summary());
+        // println!("COMMITTING FREE LIST: {:?}", writer.free_list.summary());
         let mut meta = writer.meta().clone();
         meta.transaction_id = self.transaction_id;
         meta.root_node = self.root_node_id.node_address();
@@ -220,7 +221,7 @@ impl WriteTransaction {
         writer.free_list_header = free_list_header;
         writer.free_list_node_address = free_list_node_address;
         writer.free_list.commit_allocations();
-        println!("COMMITTED FREE LIST: {:?}", writer.free_list.summary());
+        // println!("COMMITTED FREE LIST: {:?}", writer.free_list.summary());
         Ok(())
     }
 
@@ -244,11 +245,15 @@ impl WriteTransaction {
         }
         let file_size = self.database.node_manager.size()?;
         let align = file_size % page_size;
+        if align != 0 {
+            panic!("align != 0");
+        }
         let page_address = if align != 0 {
             file_size + (page_size - align)
         } else {
             file_size
         };
+        self.database.node_manager.set_size(page_address + required_pages * page_size)?;
         writer.free_list.register_allocation(page_address, self.transaction_id);
         Ok(page_address)
     }
@@ -553,6 +558,17 @@ impl WriteTransaction {
             // merge with next sibling
             let next_sibling = self.nodes.remove(&sibling_node_id).expect("next sibling");
 
+            if let InternalNodes::Branch(ref child_nodes) = next_sibling {
+                for child_node in child_nodes {
+                    let NodeId::Id(child_node_id) = child_node.node_id else {
+                        continue;
+                    };
+                    let old_parent = self.parent.remove(&child_node_id).expect("old parent");
+                    assert_eq!(old_parent, sibling_node_id, "invalid reparenting");
+                    self.parent.insert(child_node_id, node_id);
+                }
+            }
+
             self.nodes
                 .get_mut(&node_id)
                 .expect("node")
@@ -568,6 +584,17 @@ impl WriteTransaction {
         } else {
             // merge with previous sibling
             let node = self.nodes.remove(&node_id).expect("current node");
+
+            if let InternalNodes::Branch(ref child_nodes) = node {
+                for child_node in child_nodes {
+                    let NodeId::Id(child_node_id) = child_node.node_id else {
+                        continue;
+                    };
+                    let old_parent = self.parent.remove(&child_node_id).expect("old parent");
+                    assert_eq!(old_parent, node_id, "invalid reparenting");
+                    self.parent.insert(child_node_id, sibling_node_id);
+                }
+            }
 
             self.nodes
                 .get_mut(&sibling_node_id)
@@ -640,7 +667,7 @@ impl WriteTransaction {
             parent_id
         };
 
-        let child_nodes = nodes
+        let nodes = nodes
             .into_iter()
             .map(|node| {
                 let key = node.key_at(0).to_vec();
@@ -653,10 +680,31 @@ impl WriteTransaction {
             })
             .collect::<Vec<_>>();
 
-        let child_nodes_len = child_nodes.len();
+        // reparent child nodes of the split node
+        for node in nodes.iter() {
+            let new_parent_id = node.node_id.id();
+            let nodes = self.nodes
+                .get(&new_parent_id).expect("split node");
+
+            match nodes {
+                InternalNodes::Branch(nodes) => {
+                    for node in nodes {
+                        let NodeId::Id(child_node_id) = node.node_id else {
+                            continue;
+                        };
+                        let old_parent = self.parent.remove(&child_node_id).expect("old parent");
+                        assert_eq!(old_parent, node_id, "invalid reparenting");
+                        self.parent.insert(child_node_id, new_parent_id);
+                    }
+                },
+                InternalNodes::Leaf(_) => break,
+            }
+        }
+
+        let nodes_len = nodes.len();
         let parent = self.nodes.get_mut(&parent_id).expect("parent");
-        parent.splice(node_index, child_nodes);
-        Ok(child_nodes_len)
+        parent.splice(node_index, nodes);
+        Ok(nodes_len)
     }
 
     fn get_child_at_index(&mut self, node_id: u64, child_index: usize) -> Result<u64> {
@@ -678,6 +726,13 @@ impl WriteTransaction {
                 let child_node_id = self.insert_new(node);
                 self.pending_free_pages.push((page_address, header));
                 self.insert_parent(child_node_id, node_id);
+
+                let node = self.nodes.get_mut(&node_id).expect("node must exist");
+                let InternalNodes::Branch(nodes) = node else {
+                    panic!("expect branch node");
+                };
+                nodes[child_index].node_id = NodeId::Id(child_node_id);
+
                 Ok(child_node_id)
             }
         }

@@ -27,7 +27,7 @@ impl Default for Options {
         Self {
             max_files: 16,
             page_size: 4 << 10,  // 4KiB
-            cache_size: 1 << 20, // 1MiB
+            cache_size: 100 << 20, // 1MiB
         }
     }
 }
@@ -111,6 +111,7 @@ impl Database {
         file.seek(std::io::SeekFrom::Start(root_node_address))?;
         node.write(&mut file, options.page_size as u64)?;
 
+        file.set_len(root_node_address + options.page_size as u64)?;
         file.flush()?;
 
         let write_state = WriteState {

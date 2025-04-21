@@ -34,7 +34,7 @@ impl FreeList {
 
             if ((page_address - initial_page_address) / page_size) + 1 == required_pages as Address {
                 // Remove found pages from free list
-                println!("ALLOCATED PAGES: {required_pages:?}");
+                // println!("ALLOCATED PAGES: {required_pages:?}");
                 for i in 0..required_pages {
                     self.free.remove(&(initial_page_address + i * page_size));
                     self.pending_allocated
@@ -44,7 +44,7 @@ impl FreeList {
             }
             previous_page_address = Some(*page_address);
         }
-        println!("NO {required_pages:?} PAGES IN FREE LIST");
+        // println!("NO {required_pages:?} PAGES IN FREE LIST");
         None
     }
 
@@ -63,7 +63,7 @@ impl FreeList {
             pending_allocated: BTreeSet::new(),
             pending_free: BTreeMap::new(),
         };
-        println!("FREE LIST: {node:?}");
+        // println!("FREE LIST: {node:?}");
         Ok((header, node))
     }
 
@@ -71,10 +71,11 @@ impl FreeList {
         let page_size = page_size as u64;
         let data = self.copy_all();
         let data_size = NodeHeader::size() + (self.size()) as u64;
+        assert_eq!(data.len()*8, self.size());
         let overflow_len = if data_size <= page_size {
             0
         } else {
-            (data_size - page_size) / page_size
+            (data_size - page_size).div_ceil(page_size)
         };
         let header = NodeHeader {
             flags: FREELIST_NODE,
@@ -96,7 +97,7 @@ impl FreeList {
         let pending = self.pending_free.entry(transaction_id).or_default();
         let page_end_addess = page_start_address + (page_overflow + 1) * page_size;
         let mut page_address = page_start_address;
-        println!("FREEING PAGE WITH OVERFLOW: {page_overflow:?}");
+        // println!("FREEING PAGE WITH OVERFLOW: {page_overflow:?}");
         while page_address < page_end_addess {
             pending.insert(page_address);
             page_address += page_size;
@@ -140,7 +141,7 @@ impl FreeList {
         }
 
         self.pending_free.retain(|_, pages| !pages.is_empty());
-        println!("RELEASING PAGES COUNT: {:?}", freed.len());
+        // println!("RELEASING PAGES COUNT: {:?}", freed.len());
 
         for page in freed.iter() {
             self.allocated_by.remove(page);
