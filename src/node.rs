@@ -145,6 +145,7 @@ pub struct MetaNode {
     pub root_node: Address,
     pub free_list_node: Address,
     pub transaction_id: TransactionId,
+    pub end_address: Address,
 }
 
 impl MetaNode {
@@ -158,7 +159,9 @@ impl MetaNode {
         // transaction_id
         size_of::<u64>() +
         // checksum
-        size_of::<u32>()
+        size_of::<u32>() +
+        // end_address
+        size_of::<u64>()
     }
 
     pub fn page_size() -> u64 {
@@ -170,12 +173,14 @@ impl MetaNode {
         let root_node = read_u64(reader)? as Address;
         let free_list_node = read_u64(reader)? as Address;
         let transaction_id = read_u64(reader)? as TransactionId;
+        let end_address = read_u64(reader)? as Address;
         let checksum = read_u32(reader)?;
         let meta_node = Self {
             page_size,
             root_node,
             free_list_node,
             transaction_id,
+            end_address,
         };
 
         let expected_checksum = meta_node.checksum();
@@ -191,6 +196,7 @@ impl MetaNode {
         write_u64(writer, self.root_node)?;
         write_u64(writer, self.free_list_node)?;
         write_u64(writer, self.transaction_id)?;
+        write_u64(writer, self.end_address)?;
         write_u32(writer, self.checksum())?;
         Ok(())
     }
@@ -201,6 +207,7 @@ impl MetaNode {
         h.write_u64(self.root_node);
         h.write_u64(self.free_list_node);
         h.write_u64(self.transaction_id);
+        h.write_u64(self.end_address);
         h.finalize()
     }
 }
@@ -620,7 +627,7 @@ impl NodeManager {
         file.seek(SeekFrom::Start(page_address))?;
         meta_node.write(&mut file)?;
         file.flush()?;
-        // file.sync_data()?;
+        file.sync_data()?;
         self.release_file(file);
         Ok(())
     }

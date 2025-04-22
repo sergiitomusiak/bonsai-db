@@ -82,18 +82,21 @@ impl Database {
 
         let free_list_address = initial_alignment;
         let root_node_address = initial_alignment + options.page_size as u64;
+        let end_address = root_node_address + options.page_size as u64;
         let meta_nodes = [
             MetaNode {
                 page_size: options.page_size,
                 root_node: root_node_address,
                 free_list_node: free_list_address,
                 transaction_id: 0,
+                end_address,
             },
             MetaNode {
                 page_size: options.page_size,
                 root_node: root_node_address,
                 free_list_node: free_list_address,
                 transaction_id: 1,
+                end_address,
             },
         ];
         for (i, meta_node) in meta_nodes.iter().enumerate() {
@@ -111,7 +114,7 @@ impl Database {
         file.seek(std::io::SeekFrom::Start(root_node_address))?;
         node.write(&mut file, options.page_size as u64)?;
 
-        file.set_len(root_node_address + options.page_size as u64)?;
+        file.set_len(end_address)?;
         file.flush()?;
 
         let write_state = WriteState {

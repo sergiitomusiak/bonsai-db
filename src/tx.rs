@@ -245,15 +245,22 @@ impl WriteTransaction {
         }
         let file_size = self.database.node_manager.size()?;
         let align = file_size % page_size;
-        if align != 0 {
-            panic!("align != 0");
-        }
-        let page_address = if align != 0 {
-            file_size + (page_size - align)
-        } else {
-            file_size
+        assert!(align == 0);
+
+        let page_address = writer.meta().end_address;
+        let next_end_address = writer.meta().end_address + required_pages * page_size;
+        if next_end_address > file_size {
+            // grow
+            const GB: u64 = 1 << 30;
+            let new_file_size = if file_size >= GB {
+                GB.div_ceil(page_size) * page_size
+            } else {
+                file_size << 1
+            };
+            let new_file_size = std::cmp::max(new_file_size, next_end_address);
+            self.database.node_manager.set_size(new_file_size)?;
         };
-        self.database.node_manager.set_size(page_address + required_pages * page_size)?;
+        writer.meta_mut().end_address = next_end_address;
         writer.free_list.register_allocation(page_address, self.transaction_id);
         Ok(page_address)
     }
