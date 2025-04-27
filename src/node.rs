@@ -320,6 +320,17 @@ impl InternalNodes {
         }
     }
 
+    pub fn set_child_key(&mut self, child_index: usize, child_key: Vec<u8>) {
+        match self {
+            Self::Branch(nodes) => {
+                nodes[child_index].key = child_key;
+            }
+            Self::Leaf(_) => {
+                panic!("cannot update");
+            }
+        }
+    }
+
     fn split_branch(mut internal_nodes: Vec<BranchInternalNode>, threshold: u64) -> Vec<Self> {
         if internal_nodes.len() <= MIN_KEYS_PER_PAGE {
             return vec![Self::Branch(internal_nodes)];

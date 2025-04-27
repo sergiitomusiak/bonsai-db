@@ -143,7 +143,7 @@ impl WriteTransaction {
         let NodeId::Id(node_id) = self.root_node_id else {
             return Ok(());
         };
-        let root_node_address = self.traverse_write(node_id)?;
+        let (root_node_address, _) = self.traverse_write(node_id)?;
         self.root_node_id = NodeId::Address(root_node_address);
         self.write_meta_node()?;
         // self.database.node_manager.inv
@@ -186,17 +186,18 @@ impl WriteTransaction {
         Ok((page_address, node_header))
     }
 
-    fn traverse_write(&mut self, node_id: u64) -> Result<Address> {
+    fn traverse_write(&mut self, node_id: u64) -> Result<(Address, Vec<u8>)> {
         let mut child_ref = {
             let node = self.nodes.get(&node_id).expect("node");
             node.next_dirty_child(0)
         };
 
         while let Some((child_node_id, child_node_index)) = child_ref {
-            let child_page_address = self.traverse_write(child_node_id)?;
+            let (child_page_address, child_key) = self.traverse_write(child_node_id)?;
             child_ref = {
                 let node = self.nodes.get_mut(&node_id).expect("node");
                 node.set_page_address(child_node_index, child_page_address);
+                node.set_child_key(child_node_index, child_key);
                 node.next_dirty_child(child_node_index + 1)
             };
         }
@@ -204,8 +205,15 @@ impl WriteTransaction {
         let node_size = { self.nodes.get(&node_id).expect("tx node").size() };
         let page_address = self.allocate(node_size)?;
         let node = self.nodes.get(&node_id).expect("tx node");
+        let key = if node.is_empty() {
+            // When database is empty, return empty first key on root level
+            assert!(!self.parent.contains_key(&node_id));
+            Vec::new()
+        } else {
+            node.key_at(0).to_vec()
+        };
         self.database.node_manager.write_node(page_address, node)?;
-        Ok(page_address)
+        Ok((page_address, key))
     }
 
     fn write_meta_node(&mut self) -> Result<()> {
@@ -365,10 +373,9 @@ impl WriteTransaction {
         }
 
         let mut stack = cursor.stack;
-
         // Collect new dirty nodes
         let mut new_dirty_nodes = Vec::new();
-        let mut existing_dirty_nodes = Vec::new();
+        let mut existing_dirty_node = None;
         while let Some(node_ref) = stack.pop() {
             match &node_ref.node {
                 Node::ReadOnly(node) => {
@@ -379,20 +386,8 @@ impl WriteTransaction {
                     ));
                 }
                 Node::Dirty(_) => {
-                    existing_dirty_nodes.push((node_ref.index, node_ref.node_id.id()));
+                    existing_dirty_node = Some((node_ref.index, node_ref.node_id.id()));
                     break;
-                }
-            }
-        }
-
-        // Collect existing dirty nodes
-        while let Some(node_ref) = stack.pop() {
-            match &node_ref.node {
-                Node::Dirty(_) => {
-                    existing_dirty_nodes.push((node_ref.index, node_ref.node_id.id()));
-                }
-                Node::ReadOnly(_) => {
-                    panic!("unexpected read-only node");
                 }
             }
         }
@@ -403,13 +398,11 @@ impl WriteTransaction {
                 .map(|(_, node_address, (header, _))| (*node_address, header.clone())),
         );
         new_dirty_nodes.reverse();
-        existing_dirty_nodes.reverse();
+        // existing_dirty_nodes.reverse();
 
         let has_new_dirty_nodes = !new_dirty_nodes.is_empty();
         let (index, nodes, mut last_node_id) = if new_dirty_nodes.is_empty() {
-            let (index, node_id) = existing_dirty_nodes
-                .pop()
-                .ok_or_else(|| anyhow!("database is corrupted"))?;
+            let (index, node_id) = existing_dirty_node.expect("existing dirty node");
             let node = self.nodes.get_mut(&node_id).expect("node must exist");
             let InternalNodes::Leaf(ref mut nodes) = node else {
                 panic!("expected leaf node");
@@ -427,11 +420,10 @@ impl WriteTransaction {
             (index, nodes, node_id)
         };
 
-        let items_shifted = match &update {
+        match &update {
             Update::Put(key, value) => {
                 if index < nodes.len() && key == &nodes[index].key {
                     nodes[index].value = value.to_vec();
-                    false
                 } else {
                     nodes.insert(
                         index,
@@ -440,63 +432,39 @@ impl WriteTransaction {
                             value: value.to_vec(),
                         },
                     );
-                    index == 0
                 }
             }
             Update::Delete(_) => {
                 // No need to check index boundary because it was done in
                 // fast check earlier.
                 nodes.remove(index);
-                true
             }
         };
 
-        // Create new dirty branch nodes with potentially updated key item
-        let mut update_branch_key = items_shifted && index == 0;
         while let Some((index, _node_address, mut node)) = new_dirty_nodes.pop() {
             let InternalNodes::Branch(ref mut nodes) = node.1 else {
                 panic!("expected branch node");
             };
-
             nodes[index].node_id = NodeId::Id(last_node_id);
-            if update_branch_key {
-                nodes[index].key = update.key().to_vec();
-            }
-
-            update_branch_key &= index == 0;
             let inserted_node_id = self.insert_new(node.1);
             self.insert_parent(last_node_id, inserted_node_id);
             last_node_id = inserted_node_id;
         }
 
         if has_new_dirty_nodes {
-            if let Some((index, node_id)) = existing_dirty_nodes.last() {
-                let node = self.nodes.get_mut(node_id).expect("node must exist");
-
-                let InternalNodes::Branch(ref mut nodes) = node else {
-                    panic!("expected branch node");
-                };
-                nodes[*index].node_id = NodeId::Id(last_node_id);
-                self.insert_parent(last_node_id, *node_id);
-            }
-        }
-
-        // Update existing dirty branch nodes with potentially updated key item
-        while let Some((index, node_id)) = existing_dirty_nodes.pop() {
-            if update_branch_key {
+            if let Some((index, node_id)) = existing_dirty_node {
                 let node = self.nodes.get_mut(&node_id).expect("node must exist");
-
                 let InternalNodes::Branch(ref mut nodes) = node else {
                     panic!("expected branch node");
                 };
-
-                nodes[index].key = update.key().to_vec();
+                nodes[index].node_id = NodeId::Id(last_node_id);
+                self.insert_parent(last_node_id, node_id);
             }
-            update_branch_key &= index == 0;
-            last_node_id = node_id;
         }
 
-        self.root_node_id = NodeId::Id(last_node_id);
+        if existing_dirty_node.is_none() {
+            self.root_node_id = NodeId::Id(last_node_id);
+        }
 
         Ok(())
     }
