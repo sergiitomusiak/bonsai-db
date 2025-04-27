@@ -346,8 +346,7 @@ impl WriteTransaction {
         let page_size = self.database.node_manager.page_size() as u64;
         let merge_threshold = page_size / 4;
         if node.size() < merge_threshold || !node.has_min_keys() {
-            self.merge_node(node_id, node_index)?;
-            Ok(true)
+            self.merge_node(node_id, node_index)
         } else {
             Ok(false)
         }
@@ -502,7 +501,7 @@ impl WriteTransaction {
         Ok(())
     }
 
-    fn merge_node(&mut self, node_id: u64, node_index: usize) -> Result<()> {
+    fn merge_node(&mut self, node_id: u64, node_index: usize) -> Result<bool> {
         let is_root = self.parent.contains_key(&node_id).not();
 
         // If root node is a branch and only has one node then collapse it.
@@ -513,7 +512,7 @@ impl WriteTransaction {
                 let parent = InternalNodes::Leaf(Vec::new());
                 let parent_id = self.insert_new(parent);
                 self.root_node_id = NodeId::Id(parent_id);
-                return Ok(());
+                return Ok(false);
             }
 
             // If root node is a branch and only has one child node then collapse it.
@@ -529,7 +528,7 @@ impl WriteTransaction {
                 let removed = self.nodes.remove(&node_id).is_some();
                 assert!(removed, "root node must be removed");
             }
-            return Ok(());
+            return Ok(true);
         }
 
         // If node has no children then remove it
@@ -545,14 +544,17 @@ impl WriteTransaction {
                     .get_mut(&parent_id)
                     .expect("parent")
                     .remove_child_at(node_index);
-                return Ok(());
+                return Ok(true);
             }
         }
 
         // Parent must have at least two nodes
         {
             let parent = self.nodes.get(&parent_id).expect("parent node");
-            assert!(parent.len() > 1, "parent must have at least 2 children");
+            if parent.len() < 2 {
+                return Ok(false);
+            }
+            //assert!(parent.len() > 1, "parent must have at least 2 children");
         }
 
         let sibling_node_id = if node_index == 0 {
@@ -617,7 +619,7 @@ impl WriteTransaction {
             assert!(removed, "parent node must be removed");
         }
 
-        Ok(())
+        Ok(true)
     }
 
     fn traverse_split(&mut self, node_id: u64, node_index: usize) -> Result<usize> {
