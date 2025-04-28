@@ -153,6 +153,22 @@ impl<'a> Cursor<'a> {
     }
 
     pub fn seek(&mut self, key: &[u8]) -> Result<()> {
+        self.seek_internal(key)?;
+        let element = self.stack.last_mut().expect("cursor stack top");
+
+        // TODO: Emit database corrupted?
+        assert!(element.node.is_leaf(), "seek must stop at leaf node");
+        if element.node.is_empty() {
+            self.next_entry()?;
+        } else if element.index > element.node.len() - 1 {
+            element.index = element.node.len() - 1;
+            self.next_entry()?;
+        }
+
+        Ok(())
+    }
+
+    pub fn seek_internal(&mut self, key: &[u8]) -> Result<()> {
         self.stack.drain(1..);
         loop {
             let element = self.stack.last_mut().expect("cursor stack top");
@@ -176,23 +192,15 @@ impl<'a> Cursor<'a> {
                     });
                 }
                 InternalNodes::Leaf(nodes) => {
-                    if element.node.is_empty() {
-                        self.next_entry()?;
-                    } else {
-                        let index = nodes
+                    if !element.node.is_empty() {
+                        element.index = nodes
                             .binary_search_by(|node| {
                                 let node_key = &node.key[..];
                                 node_key.cmp(key)
                             })
                             .unwrap_or_else(|index| index);
-
-                        if index > element.node.len() - 1 {
-                            element.index = element.node.len() - 1;
-                            self.next_entry()?;
-                        } else {
-                            element.index = index;
-                        }
                     }
+
                     break;
                 }
             };

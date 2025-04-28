@@ -363,7 +363,7 @@ impl WriteTransaction {
     fn update(&mut self, update: Update) -> Result<()> {
         // Find node for update
         let mut cursor = Cursor::new(self.root_node_id, self)?;
-        cursor.seek(update.key())?;
+        cursor.seek_internal(update.key())?;
 
         // Fast check if deleted key does not exist
         if let Update::Delete(key) = &update {
