@@ -224,30 +224,41 @@ fn run_tx_test() -> Result<()> {
 fn shrink() -> Result<()> {
     let db = create_test_database()?;
     let mut tx = db.begin_write();
-    let n = 500;
-    let m = 100;
-    for i in 0..n {
+    let s = 0;
+    let n = 150;
+    let m = 80;
+    for i in s..n {
         // let key = format!("KEY_{:0>50?}", i);
         // let value = format!("value_{:0>50?}", i);
+
         let key = format!("KEY_{:?}", i);
         let value = format!("value_{:?}", i);
         tx.put(key.as_bytes(), value.as_bytes())?;
 
         if i % m == 0 {
-            // tx.traverse();
-            tx.commit()?;
-            tx = db.begin_write();
+            println!("<<<====COMMIT==== {i}");
         }
 
         if i % m == 0 {
-            println!("<<<====COMMIT==== {i}");
+            // println!("\n\n======= BEFORE COMMIT");
+            // tx.traverse();
+            tx.commit()?;
+            tx = db.begin_write();
+            // println!("\n\n======= AFTER COMMIT");
+            // tx.traverse();
         }
     }
+
+    // println!("\n\n======= BEFORE LAST COMMIT");
     // tx.traverse();
     tx.commit()?;
 
+    println!("<<<<DELETION>>>>");
     let mut tx = db.begin_write();
-    for i in 0..n {
+    // println!("\n\n======= BEFORE FIRST DELETION");
+    // tx.traverse();
+
+    for i in s..n {
         // let key = format!("KEY_{:0>50?}", i);
         // if i == 100 {
         //     println!("======= BEFORE REMOVE");
@@ -263,22 +274,28 @@ fn shrink() -> Result<()> {
         // }
 
         if i % m == 0 {
-            tx.commit()?;
-            tx = db.begin_write();
+            println!("<<<====COMMIT==== {i}");
         }
 
         if i % m == 0 {
-            println!("<<<====COMMIT==== {i}");
+            // println!("\n\n======= BEFORE COMMIT");
+            // tx.traverse();
+            tx.commit()?;
+            tx = db.begin_write();
+            // println!("\n\n======= AFTER COMMIT");
+            // tx.traverse();
         }
     }
     // tx.traverse();
     tx.commit()?;
 
     let mut tx = db.begin_write();
-    tx.put(b"sample", b"sample")?;
-    tx.commit()?;
+    // tx.put(b"sample", b"sample")?;
+    println!("\n\n====== FINAL TRAVERSE");
+    tx.traverse();
+    tx.rollback()?;
 
-    // let db = create_test_database()?;
+    let db = create_test_database()?;
     let tx = db.begin_read();
     let mut c = tx.cursor()?;
     display_cursor(&mut c)?;
@@ -290,7 +307,7 @@ fn run_large() -> Result<()> {
     let db = create_test_database()?;
     let mut tx = db.begin_write();
     for i in 0..10_000_000 {
-        let key = format!("KEY_{:0>50?}", i);
+        let key = format!("KEY_{:?}", i);
         let value = format!("value_{:0>50?}", i);
         tx.put(key.as_bytes(), value.as_bytes())?;
 
