@@ -18,3 +18,4 @@
     `rebalance` on parent after merging every child.
     * One option would be to ignore `parent must have at least 2 children` invariant and let it get merged recursively.
 - Bug: very slow when insert/delete 1K entries with commit per 1 entry;
+- Bug: merge is sometimes not done correctly when single node is left in a branch node;

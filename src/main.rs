@@ -4,7 +4,7 @@ use bonsai_db::{cursor::Cursor, Database, Options};
 fn options() -> Options {
     Options {
         max_files: 10,
-        page_size: 1 << 7,
+        page_size: 4 << 10,
         cache_size: 1 << 30,
     }
 }
@@ -326,6 +326,29 @@ fn run_large() -> Result<()> {
     Ok(())
 }
 
+fn slow() -> Result<()> {
+    let db = create_test_database()?;
+    let mut tx = db.begin_write();
+    for i in 0..100_000 {
+        let key = format!("KEY_{:?}", i);
+        let value = format!("value_{:0>50?}", i);
+        tx.put(key.as_bytes(), value.as_bytes())?;
+
+        if i % 1 == 0 {
+            // tx.traverse();
+            tx.commit()?;
+            tx = db.begin_write();
+        }
+
+        if i % 1 == 0 {
+            println!("<<<====COMMIT==== {i}");
+        }
+    }
+    // tx.traverse();
+    tx.commit()?;
+    Ok(())
+}
+
 fn eval_large() -> Result<()> {
     let db = create_test_database()?;
     let rtx = db.begin_read();
@@ -365,6 +388,7 @@ fn bug_repr() -> Result<()> {
 }
 
 fn main() {
+    rm();
     // setup_test_for_cursor().expect("setup test for cursor");
     // run_basic_cursor_test().expect("basic cursor test");
     // run_basic_cursor_reverse_test().expect("basic cursor reverse test");
@@ -376,5 +400,6 @@ fn main() {
     // shrink().expect("shrink");
     // shrink().expect("shrink");
     // eval_large().expect("eval large");
-    bug_repr().expect("bug repr");
+    //bug_repr().expect("bug repr");
+    slow().expect("slow");
 }
